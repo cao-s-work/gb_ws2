@@ -7,9 +7,9 @@ world_frame: "camera_init"
 
 print_time_cost: false
 
-# LiDAR filter
-lidar_filter_num: 6
-lidar_min_range: 1.0
+# LiDAR filter (indoor tuning: lower filter_num + smaller min_range)
+lidar_filter_num: 3
+lidar_min_range: 0.5
 lidar_max_range: 30.0
 scan_resolution: 0.1
 map_resolution: 0.3

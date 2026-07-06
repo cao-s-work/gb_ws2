@@ -4,14 +4,16 @@
 # 文件: /home/nvidia/gb_ws2/scripts/gb_full_chain.sh
 #
 # 启动顺序:
-#   1. LiDAR + FAST-LIO        → /cloud_body, /Odometry
-#   2. Perception (点云滤波)    → /points_nav
-#   3. 静态 TF                  → map→camera_init, lidar_link→livox_frame
-#   4. Nav2 导航栈              → /cmd_vel_nav, /map
-#   5. 定位 (cloud→scan + AMCL) → map→camera_init 变换
-#   6. 碰撞监控                 → /cmd_vel_collision
-#   7. 安全闸门                 → /cmd_vel_base
-#   8. 底盘适配器               → SDK → 狗
+#   1. LiDAR + FAST-LIO           → /cloud_body, /Odometry
+#   2. 静态 TF                     → livox_imu_link→base_link→lidar_link→livox_frame
+#   3. Perception (点云滤波)       → /points_nav
+#   4. Odometry 2D 投影            → /Odometry_2d (供 Nav2 使用)
+#   5. Nav2 导航栈                 → /cmd_vel_nav, /map
+#   6. 定位 (cloud→scan + AMCL)    → map→camera_init 变换
+#   7. 碰撞监控                    → /cmd_vel_collision
+#   8. 安全闸门                    → /cmd_vel_base
+#   9. Web 遥控
+#  10. 底盘适配器                  → SDK → 狗
 # ============================================================
 set -e
 
@@ -107,27 +109,12 @@ for i in $(seq 1 10); do
 done
 
 # ============================================================
-# 2. Perception 点云滤波
-# ============================================================
-log ""
-log "━━━ 第2步: Perception 点云滤波 ━━━"
-ros2 launch gb_perception perception.launch.py \
-    input_topic:=/cloud_body \
-    output_topic:=/points_nav \
-    > "$LOG_DIR/perception_${TIMESTAMP}.log" 2>&1 &
-PERCEP_PID=$!
-log "  PID=$PERCEP_PID"
-
-wait_for_topic "/points_nav" 15 || {
-    log "⚠️ /points_nav 未就绪，继续（可能延迟）"
-}
-
-# ============================================================
-# 3. 静态 TF（完整链: livox_imu_link→base_link→lidar_link→livox_frame）
+# 2. 静态 TF（完整链: livox_imu_link→base_link→lidar_link→livox_frame）
 # FAST-LIO 发布 camera_init→livox_imu_link，静态 TF 补完到 base_link
+# 必须在 perception 之前启动，否则 points_filter_node TF 失败会丢帧
 # ============================================================
 log ""
-log "━━━ 第3步: 静态 TF ━━━"
+log "━━━ 第2步: 静态 TF ━━━"
 
 # livox_imu_link → base_link (去除雷达斜装 pitch，使 base_link 保持水平)
 ros2 run tf2_ros static_transform_publisher \
@@ -153,10 +140,41 @@ TF_LIDAR_LIVOX_PID=$!
 log "  TF PIDs: livoximu→base=$TF_IMU_BASE_PID, base→lidar=$TF_BASE_LIDAR_PID, lidar→livox=$TF_LIDAR_LIVOX_PID"
 
 # ============================================================
-# 4. Nav2 导航栈 (含 map_server，提供 /map)
+# 3. Perception 点云滤波 (依赖静态 TF: livox_imu_link→base_link)
 # ============================================================
 log ""
-log "━━━ 第4步: Nav2 导航栈 ━━━"
+log "━━━ 第3步: Perception 点云滤波 ━━━"
+ros2 launch gb_perception perception.launch.py \
+    input_topic:=/cloud_body \
+    output_topic:=/points_nav \
+    > "$LOG_DIR/perception_${TIMESTAMP}.log" 2>&1 &
+PERCEP_PID=$!
+log "  PID=$PERCEP_PID"
+
+wait_for_topic "/points_nav" 15 || {
+    log "⚠️ /points_nav 未就绪，继续（可能延迟）"
+}
+
+# ============================================================
+# 4. Odometry 2D 投影 (/Odometry → /Odometry_2d, camera_init→base_link)
+# 必须在 Nav2 之前，因为 Nav2 使用 /Odometry_2d
+# ============================================================
+log ""
+log "━━━ 第4步: Odometry 2D 投影 ━━━"
+ros2 launch gb_lio odom_2d.launch.py \
+    > "$LOG_DIR/odom2d_${TIMESTAMP}.log" 2>&1 &
+ODOM2D_PID=$!
+log "  PID=$ODOM2D_PID"
+
+wait_for_topic "/Odometry_2d" 20 || {
+    log "⚠️ /Odometry_2d 未就绪"
+}
+
+# ============================================================
+# 5. Nav2 导航栈 (含 map_server，提供 /map，使用 /Odometry_2d)
+# ============================================================
+log ""
+log "━━━ 第5步: Nav2 导航栈 ━━━"
 ros2 launch gb_bringup nav2_minimal.launch.py \
     params_file:="$NAV2_PARAMS" \
     use_sim_time:=false \
@@ -171,11 +189,11 @@ wait_for_topic "/map" 30 || {
 }
 
 # ============================================================
-# 5. 定位: pointcloud_to_laserscan + AMCL
+# 6. 定位: pointcloud_to_laserscan + AMCL
 #    (不使用 localization.launch.py 以避免 map_server 重复)
 # ============================================================
 log ""
-log "━━━ 第5步: 定位 ━━━"
+log "━━━ 第6步: 定位 ━━━"
 
 # 5a. pointcloud_to_laserscan: /cloud_body → /scan
 ros2 run pointcloud_to_laserscan pointcloud_to_laserscan_node \
@@ -233,10 +251,10 @@ sleep 5
 log "✅ 定位栈就绪"
 
 # ============================================================
-# 6. 碰撞监控
+# 7. 碰撞监控
 # ============================================================
 log ""
-log "━━━ 第6步: 碰撞监控 ━━━"
+log "━━━ 第7步: 碰撞监控 ━━━"
 ros2 launch gb_nav2 collision_monitor.launch.py \
     params_file:="$COLLISION_CONFIG" \
     use_sim_time:=false \
@@ -250,10 +268,10 @@ wait_for_topic "/cmd_vel_collision" 20 || {
 }
 
 # ============================================================
-# 7. 安全闸门
+# 8. 安全闸门
 # ============================================================
 log ""
-log "━━━ 第7步: 安全闸门 ━━━"
+log "━━━ 第8步: 安全闸门 ━━━"
 ros2 run gb_safety safety_node \
     --ros-args \
     -r __node:=safety_node \
@@ -276,10 +294,10 @@ wait_for_topic "/cmd_vel_base" 15 || {
 }
 
 # ============================================================
-# 8. Web 遥控
+# 9. Web 遥控
 # ============================================================
 log ""
-log "━━━ 第8步: Web 遥控 ━━━"
+log "━━━ 第9步: Web 遥控 ━━━"
 ros2 launch gb_web gb_web.launch.py \
     port:=8080 \
     > "$LOG_DIR/web_${TIMESTAMP}.log" 2>&1 &
@@ -289,10 +307,10 @@ sleep 2
 ros2 topic list 2>/dev/null | grep -q "/cmd_vel_web" && log "✅ /cmd_vel_web 就绪" || log "⚠️ /cmd_vel_web 未就绪"
 
 # ============================================================
-# 8. 底盘适配器 (连接狗 SDK)
+# 10. 底盘适配器 (连接狗 SDK)
 # ============================================================
 log ""
-log "━━━ 第8步: 底盘适配器 ━━━"
+log "━━━ 第10步: 底盘适配器 ━━━"
 ros2 launch gb_base_driver real_adapter.launch.py \
     read_only:=false \
     max_linear_speed:=0.60 \
@@ -309,6 +327,7 @@ log ""
 log "进程清单:"
 log "  LiDAR+FAST-LIO  PID=$LIO_PID"
 log "  Perception      PID=$PERCEP_PID"
+log "  Odometry 2D     PID=$ODOM2D_PID"
 log "  Nav2            PID=$NAV2_PID"
 log "  cloud_to_scan   PID=$SCAN_PID"
 log "  AMCL            PID=$AMCL_PID"

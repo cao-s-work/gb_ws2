@@ -45,6 +45,7 @@ setup(
     entry_points={
         'console_scripts': [
             'icp_localization = gb_lio.icp_localization:main',
+            'lio_odom_2d_projector = gb_lio.lio_odom_2d_projector:main',
         ],
     },
 )
