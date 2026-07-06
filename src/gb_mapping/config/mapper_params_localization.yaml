@@ -1,0 +1,49 @@
+# slam_toolbox 定位模式配置
+# 使用预建序列化地图做 scan-to-map 定位
+# 
+# 前提: 需要先用 mapping 模式 + /slam_toolbox/save_map 服务保存序列化地图
+# 保存: ros2 service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap "{name: {data: '/home/nvidia/gb_maps/slam_serialized/gb_map'}}"
+slam_toolbox:
+  ros__parameters:
+    # Mode: localization (不更新地图，只做定位)
+    mode: localization
+
+    # 序列化地图路径（与 mapping 模式的 map_file_name 一致）
+    map_file_name: /home/nvidia/gb_maps/slam_serialized/gb_map
+    map_start_pose: [0.0, 0.0, 0.0]
+    map_start_at_dock: true
+
+    # Frames
+    odom_frame: camera_init
+    map_frame: map
+    base_frame: base_link
+    scan_topic: /scan
+
+    # Map (定位模式不需要更新)
+    map_update_interval: 0.0
+    resolution: 0.05
+    max_laser_range: 8.0
+    minimum_time_interval: 0.1
+    transform_publish_period: 0.05
+
+    # Solver
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_loss_function: HuberLoss
+
+    # Loop closure (定位模式不需要)
+    do_loop_closing: false
+
+    # Scan matching (定位模式需放宽，因为地图可能不完全覆盖)
+    minimum_travel_distance: 0.05   # 降低阈值，更快更新
+    minimum_travel_heading: 0.05
+
+    # 定位专用参数
+    localization_search_parameters:
+      use_scan_matching: true
+      use_scan_barycenter: true
+      minimum_first_pose_match: 0.35
+      constrain_search_space: true
+      search_space_size: 0.5
+      search_space_resolution: 0.05

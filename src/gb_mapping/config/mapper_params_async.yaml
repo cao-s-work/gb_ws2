@@ -1,0 +1,45 @@
+slam_toolbox:
+  ros__parameters:
+    # Mode
+    mode: mapping
+
+    # Serialization for future localization mode
+    map_file_name: /home/nvidia/gb_maps/slam_serialized/gb_map
+    map_start_pose: [0.0, 0.0, 0.0]
+    map_start_at_dock: true
+
+    # Frames
+    odom_frame: camera_init
+    map_frame: map
+    base_frame: base_link
+    scan_topic: /scan
+
+    # Map
+    map_update_interval: 2.0
+    resolution: 0.05
+    max_laser_range: 8.0
+    minimum_time_interval: 0.1
+    transform_publish_period: 0.05
+
+    # Solver
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_loss_function: HuberLoss
+
+    # Loop closure
+    do_loop_closing: true
+    loop_search_max_distance: 5.0
+    loop_match_min_chain_size: 10
+    loop_match_max_variance_coarse: 3.0
+    loop_match_min_response_coarse: 0.35
+    loop_match_min_response_fine: 0.45
+
+    # Correlation parameters
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+
+    # Scan matching
+    minimum_travel_distance: 0.2
+    minimum_travel_heading: 0.2

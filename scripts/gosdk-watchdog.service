@@ -1,0 +1,17 @@
+[Unit]
+Description=Go2 SDK Watchdog - 钢镚机器狗SDK自启动守护
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/bin/bash /home/firefly/gosdk_watchdog.sh
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

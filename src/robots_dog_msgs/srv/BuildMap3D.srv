@@ -1,0 +1,23 @@
+# Request
+# Path to the PCD file containing the 3D point cloud map
+string pcd_file_path
+
+---
+
+# Response
+# Status code indicating the result of the build operation
+uint8 result
+uint8 RESULT_SUCCESS = 0
+uint8 RESULT_INVALID_PATH = 1
+uint8 RESULT_LOAD_FAILED = 2
+uint8 RESULT_BUILD_TIMEOUT = 3
+uint8 RESULT_ALREADY_BUILDING = 4
+
+# Human-readable message describing the result or error
+string message
+
+# Build statistics (populated on success)
+uint32 total_nodes          # Final graph modes count
+uint32 total_connections    # Total edge connections
+uint32 point_cloud_size     # Original point cloud size
+float64 build_time_ms       # Total build time in milliseconds

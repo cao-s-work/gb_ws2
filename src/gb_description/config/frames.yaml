@@ -1,0 +1,24 @@
+# 钢镚机器人 TF 外参配置
+# TODO: 替换为真实标定数据
+
+# base_link → lidar_link 外参
+lidar:
+  x: 0.15
+  y: 0.0
+  z: 0.1
+  roll: 0.0
+  pitch: 0.0
+  yaw: 0.0
+  parent: base_link
+  child: lidar_link
+
+# base_link → imu_link 外参
+imu:
+  x: 0.0
+  y: 0.0
+  z: 0.05
+  roll: 0.0
+  pitch: 0.0
+  yaw: 0.0
+  parent: base_link
+  child: imu_link

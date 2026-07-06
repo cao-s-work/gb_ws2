@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>钢镚导航态势图</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#0d1117;color:#c9d1d9;overflow:hidden;height:100vh}
+.app{display:flex;flex-direction:column;height:100vh}
+.header{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:#161b22;border-bottom:1px solid #30363d}
+.header h1{font-size:1.1rem;color:#58a6ff}
+.header-left{display:flex;align-items:center;gap:12px}
+.status-pill{padding:3px 10px;border-radius:12px;font-size:0.75rem;font-weight:600}
+.pill-ok{background:#1b4332;color:#4ecca3}
+.pill-warn{background:#4a3728;color:#ffa500}
+.pill-err{background:#4a1a1a;color:#ff6b6b}
+.pill-idle{background:#2d2d2d;color:#888}
+.ws-dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.ws-on{background:#4ecca3}.ws-off{background:#ff6b6b}
+
+.main{display:flex;flex:1;overflow:hidden}
+.canvas-wrap{flex:0 0 70%;position:relative;background:#1a1a2e;display:flex;align-items:center;justify-content:center;overflow:hidden}
+#mapCanvas{border:1px solid #30363d;cursor:crosshair}
+.canvas-overlay{position:absolute;top:8px;left:8px;font-size:0.75rem;color:#888;background:rgba(0,0,0,0.5);padding:4px 8px;border-radius:4px;pointer-events:none}
+.canvas-hint{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);font-size:0.75rem;color:#666;background:rgba(0,0,0,0.5);padding:4px 12px;border-radius:4px}
+
+.sidebar{flex:0 0 30%;overflow-y:auto;padding:12px;background:#0d1117;border-left:1px solid #30363d}
+.panel{background:#161b22;border-radius:8px;padding:12px;margin-bottom:10px;border:1px solid #21262d}
+.panel h2{font-size:0.85rem;color:#58a6ff;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #21262d}
+.row{display:flex;justify-content:space-between;padding:3px 0;font-size:0.8rem}
+.row .lbl{color:#8b949e}.row .val{color:#c9d1d9;font-weight:600;font-family:monospace}
+.val-ok{color:#4ecca3}.val-err{color:#ff6b6b}.val-warn{color:#ffa500}
+
+.lc-grid{display:grid;grid-template-columns:1fr 1fr;gap:3px}
+.lc-item{display:flex;justify-content:space-between;padding:2px 6px;border-radius:3px;font-size:0.72rem;background:rgba(255,255,255,0.04)}
+.lc-active{border-left:2px solid #4ecca3}.lc-inactive{border-left:2px solid #ff6b6b}.lc-unknown{border-left:2px solid #555}
+
+.btn{padding:8px 14px;border:none;border-radius:6px;font-size:0.8rem;font-weight:600;cursor:pointer;width:100%;transition:opacity .2s}
+.btn:active{opacity:0.7}
+.btn-estop{background:#da3633;color:#fff;font-size:0.95rem;padding:10px}
+.btn-reset{background:#238636;color:#fff;margin-top:6px}
+.btn-nav{background:#1f6feb;color:#fff;margin-top:6px}
+.btn-cancel{background:#d29922;color:#1a1a2e;margin-top:6px}
+
+input[type=number]{width:100%;padding:5px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:0.8rem;margin-bottom:4px}
+
+.teleop-box{display:flex;flex-direction:column;align-items:center;padding:8px}
+.joystick{position:relative;width:120px;height:120px;border-radius:50%;background:radial-gradient(circle,#21262d 0%,#0d1117 100%);border:2px solid #30363d;touch-action:none}
+.stick{position:absolute;top:50%;left:50%;width:36px;height:36px;margin:-18px 0 0 -18px;background:#58a6ff;border-radius:50%;cursor:grab;transition:transform .08s}
+.stick:active{cursor:grabbing}
+.teleop-info{font-size:0.7rem;color:#666;margin-top:6px;text-align:center}
+
+.footer{padding:4px 16px;background:#161b22;border-top:1px solid #30363d;font-size:0.72rem;color:#666;max-height:60px;overflow-y:auto}
+.footer div{padding:1px 0}
+
+@media(max-width:768px){.main{flex-direction:column}.canvas-wrap{flex:0 0 50%}.sidebar{flex:1}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <div class="header-left">
+      <h1>🤖 钢镚导航态势图</h1>
+      <span class="ws-dot ws-off" id="wsDot"></span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="status-pill pill-idle" id="navStatusPill">IDLE</span>
+      <span class="status-pill pill-unknown" id="safetyPill">--</span>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="mapCanvas" width="600" height="600"></canvas>
+      <div class="canvas-overlay" id="canvasInfo">等待地图...</div>
+      <div class="canvas-hint">点击地图设置导航目标</div>
+    </div>
+
+    <div class="sidebar">
+      <!-- 机器人状态 -->
+      <div class="panel">
+        <h2>📍 机器人状态</h2>
+        <div class="row"><span class="lbl">位置 X/Y</span><span class="val" id="odomPos">0.00 / 0.00</span></div>
+        <div class="row"><span class="lbl">航向角</span><span class="val" id="odomYaw">0.0°</span></div>
+        <div class="row"><span class="lbl">速度 v/ω</span><span class="val" id="odomVel">0.00 / 0.00</span></div>
+        <div class="row"><span class="lbl">电池</span><span class="val" id="batteryVal">--</span></div>
+      </div>
+
+      <!-- 目标 -->
+      <div class="panel">
+        <h2>🎯 导航目标</h2>
+        <div class="row"><span class="lbl">目标 X/Y</span><span class="val" id="goalPos">未设置</span></div>
+        <div class="row"><span class="lbl">航向</span><span class="val" id="goalYaw">--</span></div>
+        <input type="number" id="goalX" value="0.8" step="0.1" placeholder="X (m)">
+        <input type="number" id="goalY" value="0.0" step="0.1" placeholder="Y (m)">
+        <input type="number" id="goalYaw" value="0" step="15" placeholder="航向 (°)">
+        <button class="btn btn-nav" onclick="sendGoal()">发送导航目标</button>
+        <button class="btn btn-cancel" onclick="cancelGoal()">取消导航</button>
+      </div>
+
+      <!-- Lifecycle -->
+      <div class="panel">
+        <h2>🔄 Nav2 Lifecycle</h2>
+        <div class="lc-grid" id="lcGrid"><div class="lc-item lc-unknown"><span>等待...</span></div></div>
+      </div>
+
+      <!-- 遥控 -->
+      <div class="panel">
+        <h2>🎮 手动遥控</h2>
+        <div class="teleop-box">
+          <div class="joystick" id="joystick">
+            <div class="stick" id="stick"></div>
+          </div>
+          <div class="teleop-info" id="teleopInfo">拖动摇杆控制</div>
+        </div>
+        <button class="btn btn-cancel" onclick="teleopStop()">松开停车</button>
+      </div>
+
+      <!-- 动作 -->
+      <div class="panel">
+        <h2>🐕 动作</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center">
+          <button class="btn" style="background:#2563eb" onclick="fetch('/api/stand',{method:'POST'}).then(r=>r.json()).then(d=>log(d.message||'站立中...'))">🦴 站立</button>
+          <button class="btn" style="background:#7c3aed" onclick="fetch('/api/lie',{method:'POST'}).then(r=>r.json()).then(d=>log(d.message||'趴下中...'))">😴 趴下</button>
+          <button class="btn" style="background:#dc2626" onclick="if(confirm('确认失能？'))fetch('/api/passive',{method:'POST'}).then(r=>r.json()).then(d=>log(d.message||'已失能'))">⛔ 失能</button>
+        </div>
+      </div>
+
+      <!-- 安全 -->
+      <div class="panel">
+        <h2>🚨 安全控制</h2>
+        <button class="btn btn-estop" onclick="estop()">🔴 急停</button>
+        <button class="btn btn-reset" onclick="estopReset()">🟢 解除急停</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer" id="footer">
+    <div>系统就绪 — 等待连接...</div>
+  </div>
+</div>
+
+<script>
+// ============ 全局状态 ============
+let ws = null;
+let mapInfo = null;      // {resolution, width, height, origin_x, origin_y}
+let mapGrid = null;      // Uint8Array
+let robotPose = {x:0, y:0, yaw:0};
+let planPoints = [];     // [[x,y],...]
+let pointsData = [];     // [[x,y],...]
+let goalPoint = null;    // {x,y,yaw}
+let navStatus = 'idle';
+let safetyState = 'UNKNOWN';
+
+// ============ Canvas ============
+const canvas = document.getElementById('mapCanvas');
+const ctx = canvas.getContext('2d');
+const canvasInfo = document.getElementById('canvasInfo');
+
+// 自适应 canvas 大小
+function resizeCanvas() {
+  const wrap = document.getElementById('canvasWrap');
+  const size = Math.min(wrap.clientWidth - 20, wrap.clientHeight - 20, 700);
+  canvas.width = size;
+  canvas.height = size;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// 世界坐标 → Canvas 坐标
+function worldToCanvas(wx, wy) {
+  if (!mapInfo) return [0, 0];
+  const scale = canvas.width / (mapInfo.width * mapInfo.resolution);
+  const cx = (wx - mapInfo.origin_x) * scale;
+  const cy = canvas.height - (wy - mapInfo.origin_y) * scale;
+  return [cx, cy];
+}
+
+// Canvas 坐标 → 世界坐标
+function canvasToWorld(cx, cy) {
+  if (!mapInfo) return [0, 0];
+  const scale = canvas.width / (mapInfo.width * mapInfo.resolution);
+  const wx = cx / scale + mapInfo.origin_x;
+  const wy = (canvas.height - cy) / scale + mapInfo.origin_y;
+  return [wx, wy];
+}
+
+// ============ 绘制 ============
+function drawAll() {
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (!mapInfo) {
+    ctx.fillStyle = '#555';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('等待地图数据...', canvas.width/2, canvas.height/2);
+    return;
+  }
+
+  const scale = canvas.width / (mapInfo.width * mapInfo.resolution);
+  const cellSize = mapInfo.resolution * scale;
+
+  // 1. 画 /map 栅格
+  if (mapGrid) {
+    for (let y = 0; y < mapInfo.height; y++) {
+      for (let x = 0; x < mapInfo.width; x++) {
+        const idx = y * mapInfo.width + x;
+        const val = mapGrid[idx];
+        if (val === 0) {
+          // free space - 浅灰
+          ctx.fillStyle = '#e8e8e8';
+        } else if (val === 100 || val > 50) {
+          // occupied - 深色
+          ctx.fillStyle = '#333';
+        } else if (val === 255 || val < 0) {
+          // unknown - 不画 (背景色)
+          continue;
+        } else {
+          // gradient
+          const g = 255 - val * 2;
+          ctx.fillStyle = `rgb(${g},${g},${g})`;
+        }
+        ctx.fillRect(x * cellSize, (mapInfo.height - 1 - y) * cellSize,
+                     Math.ceil(cellSize), Math.ceil(cellSize));
+      }
+    }
+  }
+
+  // 2. 画 points_nav (橙色点)
+  if (pointsData.length > 0) {
+    ctx.fillStyle = 'rgba(255, 165, 0, 0.4)';
+    for (const [px, py] of pointsData) {
+      const [cx, cy] = worldToCanvas(px, py);
+      if (cx >= 0 && cx < canvas.width && cy >= 0 && cy < canvas.height) {
+        ctx.fillRect(cx - 1, cy - 1, 2, 2);
+      }
+    }
+  }
+
+  // 3. 画 /plan 路径 (蓝色)
+  if (planPoints.length > 1) {
+    ctx.strokeStyle = '#58a6ff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < planPoints.length; i++) {
+      const [cx, cy] = worldToCanvas(planPoints[i][0], planPoints[i][1]);
+      if (i === 0) ctx.moveTo(cx, cy);
+      else ctx.lineTo(cx, cy);
+    }
+    ctx.stroke();
+  }
+
+  // 4. 画目标点 (红色圆)
+  if (goalPoint) {
+    const [cx, cy] = worldToCanvas(goalPoint.x, goalPoint.y);
+    ctx.fillStyle = '#ff6b6b';
+    ctx.beginPath();
+    ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // 目标方向线
+    const yawRad = goalPoint.yaw * Math.PI / 180;
+    ctx.strokeStyle = '#ff6b6b';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(yawRad) * 15, cy - Math.sin(yawRad) * 15);
+    ctx.stroke();
+  }
+
+  // 5. 画机器人位置 (绿色箭头)
+  const [rx, ry] = worldToCanvas(robotPose.x, robotPose.y);
+  ctx.save();
+  ctx.translate(rx, ry);
+  ctx.rotate(-robotPose.yaw); // canvas Y 向下, 需要取反
+  ctx.fillStyle = '#4ecca3';
+  ctx.beginPath();
+  ctx.moveTo(0, -8);     // 前端
+  ctx.lineTo(-5, 5);     // 左后
+  ctx.lineTo(5, 5);      // 右后
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.restore();
+
+  // 更新 overlay 信息
+  canvasInfo.textContent = `狗: (${robotPose.x.toFixed(2)}, ${robotPose.y.toFixed(2)}) | ` +
+    `目标: ${goalPoint ? `(${goalPoint.x.toFixed(2)}, ${goalPoint.y.toFixed(2)})` : '无'} | ` +
+    `路径: ${planPoints.length} 点 | 障碍: ${pointsData.length} 点`;
+}
+
+// ============ WebSocket ============
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('wsDot').className = 'ws-dot ws-on';
+    log('WebSocket 已连接');
+  };
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    handleMessage(msg);
+  };
+
+  ws.onclose = () => {
+    document.getElementById('wsDot').className = 'ws-dot ws-off';
+    log('WebSocket 断开, 2s 后重连...');
+    teleopStop();
+    setTimeout(connectWS, 2000);
+  };
+
+  ws.onerror = () => {};
+}
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'state':
+      updateState(msg.data);
+      break;
+    case 'map':
+      mapInfo = msg.data.info;
+      // 解码 base64 → Uint8Array
+      const binStr = atob(msg.data.grid);
+      mapGrid = new Uint8Array(binStr.length);
+      for (let i = 0; i < binStr.length; i++)
+        mapGrid[i] = binStr.charCodeAt(i) & 0xFF;
+      // 修正: int8 → 0-255, -1 → 255, 0 → 0, 100 → 100
+      for (let i = 0; i < mapGrid.length; i++) {
+        if (mapGrid[i] > 127) mapGrid[i] = 255; // unknown
+      }
+      log(`地图加载: ${mapInfo.width}x${mapInfo.height}, res=${mapInfo.resolution}`);
+      drawAll();
+      break;
+    case 'plan':
+      planPoints = msg.data;
+      drawAll();
+      break;
+    case 'points':
+      pointsData = msg.data;
+      drawAll();
+      break;
+    case 'goal':
+      goalPoint = msg.data;
+      if (goalPoint) {
+        document.getElementById('goalPos').textContent =
+          `${goalPoint.x.toFixed(2)} / ${goalPoint.y.toFixed(2)}`;
+        document.getElementById('goalYaw').textContent = `${goalPoint.yaw}°`;
+      } else {
+        document.getElementById('goalPos').textContent = '未设置';
+        document.getElementById('goalYaw').textContent = '--';
+      }
+      drawAll();
+      break;
+  }
+}
+
+function updateState(data) {
+  safetyState = data.safety_state;
+  navStatus = data.nav_status;
+
+  // 安全状态
+  const sEl = document.getElementById('safetyPill');
+  sEl.textContent = data.safety_state;
+  sEl.className = 'status-pill ' +
+    (data.safety_state === 'OK' || data.safety_state === 'LIMITING' ? 'pill-ok' :
+     data.safety_state === 'ESTOP' ? 'pill-err' : 'pill-warn');
+
+  // 导航状态
+  const nEl = document.getElementById('navStatusPill');
+  nEl.textContent = data.nav_status.toUpperCase();
+  nEl.className = 'status-pill ' +
+    (data.nav_status === 'navigating' ? 'pill-warn' :
+     data.nav_status === 'estop' ? 'pill-err' : 'pill-idle');
+
+  // 里程计
+  robotPose = {x: data.odom.x, y: data.odom.y, yaw: data.odom.yaw};
+  document.getElementById('odomPos').textContent =
+    `${data.odom.x.toFixed(2)} / ${data.odom.y.toFixed(2)}`;
+  document.getElementById('odomYaw').textContent =
+    `${(data.odom.yaw * 180 / Math.PI).toFixed(1)}°`;
+  document.getElementById('odomVel').textContent =
+    `${data.odom.vx.toFixed(2)} / ${data.odom.wz.toFixed(2)}`;
+
+  // 电池
+  const pct = Math.round(data.battery.percentage * 100);
+  document.getElementById('batteryVal').textContent =
+    `${pct}% / ${data.battery.voltage.toFixed(1)}V`;
+
+  // Lifecycle
+  const lcLabels = {
+    'map_server':'Map','planner_server':'Planner','controller_server':'Ctrl',
+    'smoother_server':'Smooth','behavior_server':'Behav','bt_navigator':'BT',
+    'velocity_smoother':'VelSm','collision_monitor':'ColMon'
+  };
+  let html = '';
+  for (const [name, state] of Object.entries(data.lifecycle)) {
+    const label = lcLabels[name] || name;
+    const active = state.id === 3;
+    const cls = active ? 'lc-active' : (state.id === 0 ? 'lc-unknown' : 'lc-inactive');
+    const icon = active ? '✅' : '❌';
+    html += `<div class="lc-item ${cls}"><span>${label}</span><span>${icon}</span></div>`;
+  }
+  if (html) document.getElementById('lcGrid').innerHTML = html;
+
+  // 如果 plan_seq 变了, 请求新路径
+  if (data.plan_seq !== window._lastPlanSeq) {
+    window._lastPlanSeq = data.plan_seq;
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({type: 'get_plan'}));
+    }
+  }
+
+  drawAll();
+}
+
+// ============ Canvas 点击设目标 ============
+canvas.addEventListener('click', (e) => {
+  if (!mapInfo) return;
+  const rect = canvas.getBoundingClientRect();
+  const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
+  const [wx, wy] = canvasToWorld(cx, cy);
+
+  document.getElementById('goalX').value = wx.toFixed(2);
+  document.getElementById('goalY').value = wy.toFixed(2);
+  // 计算朝向: 从机器人位置指向目标
+  const dx = wx - robotPose.x;
+  const dy = wy - robotPose.y;
+  const yawDeg = Math.round(Math.atan2(dy, dx) * 180 / Math.PI);
+  document.getElementById('goalYaw').value = yawDeg;
+
+  log(`点击目标: (${wx.toFixed(2)}, ${wy.toFixed(2)}), 朝向 ${yawDeg}°`);
+  sendGoal();
+});
+
+// ============ REST API ============
+async function api(url, data = null) {
+  const opts = {method: 'POST', headers: {'Content-Type': 'application/json'}};
+  if (data) opts.body = JSON.stringify(data);
+  try {
+    const r = await fetch(url, opts);
+    return await r.json();
+  } catch(e) { return {ok: false, error: e.message}; }
+}
+
+async function sendGoal() {
+  const x = parseFloat(document.getElementById('goalX').value);
+  const y = parseFloat(document.getElementById('goalY').value);
+  const yaw = parseFloat(document.getElementById('goalYaw').value);
+  const r = await api('/api/nav/goal', {x, y, yaw});
+  if (r.ok) log(`✅ 导航目标已发送: (${x}, ${y}, ${yaw}°)`);
+  else log(`❌ 发送失败: ${r.error}`);
+}
+
+async function cancelGoal() {
+  const r = await api('/api/nav/cancel');
+  log(r.ok ? '✅ 已取消导航' : `❌ ${r.error}`);
+}
+
+async function estop() {
+  const r = await api('/api/estop');
+  log(r.ok ? '🔴 急停已触发' : `❌ ${r.error}`);
+}
+
+async function estopReset() {
+  const r = await api('/api/estop/reset');
+  log(r.ok ? '🟢 急停已解除' : `❌ ${r.error}`);
+}
+
+// ============ 摇杆遥控 ============
+const joystick = document.getElementById('joystick');
+const stick = document.getElementById('stick');
+let dragging = false;
+const maxR = 42;
+
+function jStart(e) { dragging = true; jMove(e); }
+function jMove(e) {
+  if (!dragging) return;
+  e.preventDefault();
+  const rect = joystick.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  let dx = (e.touches ? e.touches[0].clientX : e.clientX) - cx;
+  let dy = (e.touches ? e.touches[0].clientY : e.clientY) - cy;
+  const d = Math.hypot(dx, dy);
+  if (d > maxR) { dx = dx/d*maxR; dy = dy/d*maxR; }
+  stick.style.transform = `translate(${dx}px,${dy}px)`;
+  const vx = (-dy/maxR) * 0.3;
+  const wz = (-dx/maxR) * 0.5;
+  api('/api/teleop', {vx, wz});
+  document.getElementById('teleopInfo').textContent =
+    `v=${vx.toFixed(2)} ω=${wz.toFixed(2)}`;
+}
+function jEnd() {
+  dragging = false;
+  stick.style.transform = 'translate(0,0)';
+  teleopStop();
+}
+function teleopStop() {
+  api('/api/teleop/stop');
+  document.getElementById('teleopInfo').textContent = '已停车';
+}
+
+joystick.addEventListener('mousedown', jStart);
+document.addEventListener('mousemove', jMove);
+document.addEventListener('mouseup', jEnd);
+joystick.addEventListener('touchstart', jStart);
+document.addEventListener('touchmove', jMove, {passive: false});
+document.addEventListener('touchend', jEnd);
+window.addEventListener('beforeunload', teleopStop);
+
+// ============ 日志 ============
+function log(msg) {
+  const f = document.getElementById('footer');
+  const t = new Date().toLocaleTimeString();
+  const div = document.createElement('div');
+  div.textContent = `[${t}] ${msg}`;
+  f.appendChild(div);
+  f.scrollTop = f.scrollHeight;
+  // 保留最近 20 条
+  while (f.children.length > 20) f.removeChild(f.firstChild);
+}
+
+// ============ 启动 ============
+connectWS();
+// 动画循环 (即使没新数据也重绘, 平滑过渡)
+setInterval(() => { if (mapInfo) drawAll(); }, 200);
+</script>
+</body>
+</html>

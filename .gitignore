@@ -1,0 +1,42 @@
+# ROS 2 workspace generated files
+build/
+install/
+log/
+
+# Runtime logs
+logs/
+
+# ROS log directory
+**/.ros/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Compiled objects
+*.o
+*.so
+
+# IDE
+.vscode/
+.idea/
+
+# System
+.DS_Store
+*.swp
+*.swo
+
+# Maps (large binary files)
+*.pgm
+*.png
+*.yaml
+!**/config/*.yaml
+
+# SDK binary
+sdk/genisom_l1_sdk-main/
+
+# Secrets
+.env
+*.key
+*.pem

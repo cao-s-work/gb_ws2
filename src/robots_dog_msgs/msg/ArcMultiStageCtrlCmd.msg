@@ -1,0 +1,3 @@
+bool enable
+bool rollback_enabled
+float64 rollback_x_threshold

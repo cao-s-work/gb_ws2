@@ -1,0 +1,20 @@
+/**:
+  ros__parameters:
+    # 速度限制
+    max_linear_speed: 0.3        # m/s
+    max_angular_speed: 0.5       # rad/s
+    max_linear_accel: 0.5        # m/s^2
+    max_angular_accel: 1.0       # rad/s^2
+
+    # 超时
+    cmd_timeout_ms: 500          # 毫秒, 超过此时间无 cmd_vel 则归零
+
+    # Mock 里程计
+    enable_mock_odom: true       # 模拟里程计 (从 cmd_vel 积分)
+
+    # 模拟电池
+    mock_battery_percentage: 85  # 模拟电量百分比
+    mock_battery_voltage: 24.0   # 模拟电压
+
+    # 发布
+    publish_rate: 20.0           # Hz

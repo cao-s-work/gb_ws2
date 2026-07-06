@@ -1,0 +1,43 @@
+imu_topic: /livox/imu
+lidar_topic: /livox/lidar
+
+# FAST-LIO output frames
+body_frame: "livox_imu_link"
+world_frame: "camera_init"
+
+print_time_cost: false
+
+# LiDAR filter
+lidar_filter_num: 6
+lidar_min_range: 1.0
+lidar_max_range: 30.0
+scan_resolution: 0.1
+map_resolution: 0.3
+
+# Map parameters
+cube_len: 300
+det_range: 60
+move_thresh: 1.5
+
+# IMU noise parameters (MID-360 IMU)
+na: 0.1
+ng: 0.1
+nba: 0.0001
+nbg: 0.0001
+
+# Initialization
+imu_init_num: 20
+near_search_num: 5
+ieskf_max_iter: 5
+
+# Gravity alignment
+gravity_align: true
+esti_il: false
+
+# LiDAR-to-IMU extrinsic (from previous calibration)
+# MID-360 IMU is built into the LiDAR, small offset
+r_il: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+t_il: [-0.011, -0.02329, 0.04412]
+
+# LiDAR covariance
+lidar_cov_inv: 1000.0

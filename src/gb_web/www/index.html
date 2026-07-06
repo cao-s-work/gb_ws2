@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+<title>ZSL-1W 地图导航控制台</title>
+<style>
+  :root{
+    --bg:#0b0f16;
+    --panel:#111722;
+    --panel2:#151d2a;
+    --line:#263245;
+    --text:#dbeafe;
+    --muted:#94a3b8;
+    --blue:#4ea1ff;
+    --green:#22c55e;
+    --yellow:#facc15;
+    --red:#ef4444;
+    --orange:#f97316;
+    --purple:#a855f7;
+    --cyan:#06b6d4;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  button,input{font:inherit}
+  .app{height:100vh;width:100vw;display:grid;grid-template-rows:34px 1fr 96px;background:radial-gradient(circle at top,#111827 0,#080b10 60%)}
+
+  /* top */
+  .topbar{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;padding:0 14px;border-bottom:1px solid #1f2937;background:rgba(9,13,20,.96)}
+  .speed-wrap{display:flex;align-items:center;gap:10px;min-width:240px}
+  .speed-label{font-size:13px;color:var(--yellow);white-space:nowrap;font-weight:700}
+  .speed-slider{flex:1;-webkit-appearance:none;appearance:none;height:7px;border-radius:999px;background:linear-gradient(90deg,#16a34a,#22c55e,#f59e0b,#ef4444);outline:none;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
+  .speed-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:26px;height:26px;border-radius:50%;background:var(--blue);border:2px solid #93c5fd;box-shadow:0 2px 12px rgba(78,161,255,.65);cursor:pointer}
+  .speed-slider::-moz-range-thumb{width:26px;height:26px;border-radius:50%;background:var(--blue);border:2px solid #93c5fd;box-shadow:0 2px 12px rgba(78,161,255,.65);cursor:pointer}
+  .speed-percent{min-width:42px;text-align:right;color:var(--blue);font-weight:800}
+  .status-strip{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);white-space:nowrap}
+  .pill{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;background:#121a26;border:1px solid #223047;color:#cbd5e1}
+  .dot{width:8px;height:8px;border-radius:50%;background:#64748b;display:inline-block}
+  .dot.on{background:var(--green);box-shadow:0 0 10px var(--green)}
+  .dot.warn{background:var(--yellow);box-shadow:0 0 10px var(--yellow)}
+  .dot.bad{background:var(--red);box-shadow:0 0 10px var(--red)}
+
+  /* main */
+  .main{position:relative;display:grid;grid-template-columns:148px 1fr 148px;gap:10px;padding:10px 12px 8px;min-height:0}
+  .map-panel{position:relative;min-width:0;border:1px solid #283244;border-radius:14px;background:#080c12;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.02)}
+  #mapCanvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:crosshair}
+  .map-hud{position:absolute;left:12px;top:10px;display:flex;gap:8px;flex-wrap:wrap;z-index:3;pointer-events:none}
+  .hud-item{background:rgba(8,12,18,.78);border:1px solid rgba(148,163,184,.22);backdrop-filter:blur(6px);border-radius:999px;padding:5px 9px;font-size:12px;color:#cbd5e1;box-shadow:0 2px 10px rgba(0,0,0,.25)}
+  .coord{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);z-index:3;background:rgba(8,12,18,.75);border:1px solid rgba(148,163,184,.22);border-radius:999px;padding:5px 10px;font-size:12px;color:#cbd5e1;pointer-events:none;min-width:120px;text-align:center}
+  .legend{position:absolute;right:12px;top:10px;display:flex;gap:6px;z-index:3;font-size:11px;color:#cbd5e1;background:rgba(8,12,18,.72);border:1px solid rgba(148,163,184,.22);border-radius:10px;padding:6px 8px;backdrop-filter:blur(6px)}
+  .legend span{display:flex;align-items:center;gap:4px}.sw{width:9px;height:9px;border-radius:2px;display:inline-block}.sw.robot{background:var(--blue);border-radius:50%}.sw.plan{background:#60a5fa}.sw.points{background:var(--orange)}.sw.goal{background:var(--red)}
+  .empty-tip{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);text-align:center;color:#94a3b8;font-size:14px;line-height:1.9;z-index:1;pointer-events:none}
+
+  /* joysticks */
+  .side{display:flex;align-items:center;justify-content:center;min-height:0;position:relative}
+  .joy-wrap{display:flex;flex-direction:column;align-items:center;gap:8px;user-select:none}
+  .joy-title{font-size:12px;color:#94a3b8;font-weight:800;letter-spacing:1px}
+  .joy{width:132px;height:132px;border-radius:50%;background:radial-gradient(circle at center,#1e293b,#111827 70%);border:2px solid #30384a;box-shadow:inset 0 0 28px rgba(78,161,255,.08),0 8px 28px rgba(0,0,0,.35);position:relative;touch-action:none}
+  .knob{position:absolute;left:50%;top:50%;width:54px;height:54px;border-radius:50%;background:var(--blue);transform:translate(-50%,-50%);box-shadow:0 8px 24px rgba(78,161,255,.45);border:2px solid #93c5fd}
+  .joy::before,.joy::after{content:"";position:absolute;background:rgba(148,163,184,.13)}
+  .joy::before{left:50%;top:13px;bottom:13px;width:1px}.joy::after{top:50%;left:13px;right:13px;height:1px}
+
+  /* bottom */
+  .bottom{border-top:1px solid #1f2937;background:rgba(9,13,20,.97);padding:9px 10px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr;gap:8px;align-items:stretch}
+  .btn{border:none;border-radius:10px;color:#fff;font-weight:800;font-size:15px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.18);transition:transform .08s,filter .12s;min-height:44px}
+  .btn:active{transform:scale(.98);filter:brightness(.88)}
+  .btn.blue{background:#2563eb}.btn.purple{background:#7c3aed}.btn.red{background:#dc2626}.btn.orange{background:#ea580c}.btn.cyan{background:#0891b2}.btn.magenta{background:#c026d3}.btn.gray{background:#334155}.btn.green{background:#16a34a}.btn.yellow{background:#ca8a04}
+  .dropdown{position:absolute;left:50%;bottom:106px;transform:translateX(-50%);z-index:10;background:rgba(10,15,22,.96);border:1px solid #283244;border-radius:12px;padding:10px;display:none;gap:8px;box-shadow:0 8px 26px rgba(0,0,0,.45)}
+  .dropdown.open{display:flex}.dropdown .btn{padding:0 14px;font-size:14px;min-width:92px}
+
+  .goal-panel{position:absolute;right:16px;bottom:14px;z-index:4;background:rgba(8,12,18,.84);border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;backdrop-filter:blur(6px)}
+  .goal-panel input{width:76px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:7px 8px;outline:none}.goal-panel label{font-size:12px;color:#94a3b8}.mini-btn{border:none;border-radius:8px;padding:8px 11px;font-weight:800;color:#fff;background:#2563eb;cursor:pointer}.mini-btn.red{background:#dc2626}.mini-btn.gray{background:#334155}.mini-btn.yellow{background:#ca8a04}.mini-btn.green{background:#16a34a}.mini-btn.active{box-shadow:0 0 0 2px rgba(250,204,21,.65) inset}
+  .toast{position:absolute;left:50%;top:46px;transform:translateX(-50%);z-index:20;background:rgba(15,23,42,.96);border:1px solid #334155;border-radius:12px;padding:9px 14px;color:#e2e8f0;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.35);opacity:0;pointer-events:none;transition:opacity .18s,transform .18s}.toast.show{opacity:1;transform:translateX(-50%) translateY(4px)}
+
+  @media(max-width:760px){
+    .app{grid-template-rows:70px 1fr 154px}.topbar{grid-template-columns:1fr;padding:7px 10px;gap:6px}.status-strip{justify-content:center;flex-wrap:wrap}.main{grid-template-columns:1fr;grid-template-rows:1fr 122px;padding:8px}.side{position:absolute;bottom:10px;width:130px;height:130px;z-index:5}.side.left{left:10px}.side.right{right:10px}.joy{width:116px;height:116px}.knob{width:48px;height:48px}.map-panel{grid-row:1 / span 2}.bottom{grid-template-columns:repeat(3,1fr);grid-auto-rows:42px}.goal-panel{right:10px;left:10px;bottom:150px;justify-content:center}.legend{display:none}.map-hud{max-width:calc(100% - 20px)}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="speed-wrap">
+      <span class="speed-label">⚡ 速度</span>
+      <input id="speed" class="speed-slider" type="range" min="0.05" max="1" value="0.5" step="0.05" />
+      <span id="speedText" class="speed-percent">50%</span>
+    </div>
+    <div class="status-strip">
+      <span class="pill"><span id="wsDot" class="dot"></span><span id="wsText">连接中</span></span>
+      <span class="pill">🔋 <span id="batteryText">--%</span></span>
+      <span class="pill">🛡️ <span id="safetyText">--</span></span>
+      <span class="pill">🧭 <span id="navText">idle</span></span>
+      <span class="pill">📍 <span id="poseText">--,--</span></span>
+      <span class="pill">🧰 <span id="toolText">目标</span></span>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="side left"><div class="joy-wrap"><div class="joy-title">移动</div><div class="joy" id="moveJoy"><div class="knob" id="moveKnob"></div></div></div></div>
+
+    <div class="map-panel" id="mapPanel">
+      <canvas id="mapCanvas"></canvas>
+      <div class="empty-tip" id="emptyTip">等待 /map 与 /amcl_pose 数据...<br/>WebSocket 连接后会自动显示地图</div>
+      <div class="map-hud">
+        <span class="hud-item">地图 <b id="mapInfoText">--</b></span>
+        <span class="hud-item">点云 <b id="pointsText">0</b></span>
+        <span class="hud-item">路径 <b id="planText">0</b></span>
+      </div>
+      <div class="legend"><span><i class="sw robot"></i>狗</span><span><i class="sw plan"></i>路径</span><span><i class="sw points"></i>点云</span><span><i class="sw goal"></i>目标</span></div>
+      <div class="coord" id="coordText">X:-- Y:-- θ:--</div>
+      <div class="goal-panel">
+        <label>目标 yaw°</label><input id="goalYaw" type="number" value="0" step="5" />
+        <button class="mini-btn" id="sendGoalBtn">发送目标</button>
+        <button class="mini-btn gray" id="clearGoalBtn">清除</button>
+        <button class="mini-btn yellow" id="relocalizeBtn">📍 重定位</button>
+        <button class="mini-btn green" id="globalLocalizeBtn">🌐 全局</button>
+      </div>
+    </div>
+
+    <div class="side right"><div class="joy-wrap"><div class="joy-title">转向</div><div class="joy" id="turnJoy"><div class="knob" id="turnKnob"></div></div></div></div>
+  </div>
+
+  <div class="bottom">
+    <button class="btn blue" id="standBtn">🦴 站立</button>
+    <button class="btn purple" id="lieBtn">😴 趴下</button>
+    <button class="btn red" id="estopBtn">⛔ 急停</button>
+    <button class="btn orange" id="cmdMenuBtn">🛠️ SDK 命令 ▾</button>
+    <button class="btn cyan" id="resetBtn">🟢 解急停</button>
+    <button class="btn gray" id="cancelNavBtn">✖ 取消导航</button>
+  </div>
+
+  <div class="dropdown" id="cmdDropdown">
+    <button class="btn gray" id="passiveBtn">失能</button>
+    <button class="btn orange" id="climbBtn">爬高楼</button>
+    <button class="btn cyan" id="handshakeBtn">握手</button>
+    <button class="btn magenta" id="danceBtn">跳舞</button>
+  </div>
+
+  <div class="toast" id="toast"></div>
+</div>
+
+<script>
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+const canvas = $('mapCanvas');
+const ctx = canvas.getContext('2d');
+
+let ws = null;
+let wsRetryTimer = null;
+let state = null;
+let mapInfo = null;
+let mapCanvas = null;
+let plan = [];
+let points = [];
+let pointsStamp = 0;
+let pointsFrame = 'base_link';
+let latestGoal = null;
+let selectedGoal = null;
+let mouseWorld = null;
+
+// 当前地图工具：goal=点击设导航目标，relocalize=两次点击设置 AMCL 初始位姿
+let currentTool = 'goal';
+let relocalizeAnchor = null;
+
+const view = { scale: 1, offsetX: 0, offsetY: 0, width: 0, height: 0 };
+const robot = { x: 0, y: 0, yaw: 0, valid: false };
+const joy = { move: {x:0,y:0,active:false}, turn: {x:0,y:0,active:false} };
+const keys = new Set();
+let lastTeleopNonZero = false;
+let lastSendTs = 0;
+
+function toast(msg, ms=1600){
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(()=>t.classList.remove('show'), ms);
+}
+
+async function postJSON(path, data={}){
+  const resp = await fetch(path, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(data)
+  });
+  let js = null;
+  try { js = await resp.json(); } catch(e) { js = {}; }
+  if (!resp.ok || js.ok === false) {
+    throw new Error(js.error || js.message || `${path} failed`);
+  }
+  return js;
+}
+
+function connectWS(){
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    $('wsDot').className = 'dot on';
+    $('wsText').textContent = '已连接';
+    toast('WebSocket 已连接');
+    try { ws.send(JSON.stringify({type:'get_map'})); } catch(e) {}
+    try { ws.send(JSON.stringify({type:'get_plan'})); } catch(e) {}
+  };
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch(e) { return; }
+    if (msg.type === 'state') handleState(msg.data);
+    else if (msg.type === 'map') handleMap(msg.data);
+    else if (msg.type === 'plan') { plan = msg.data || []; $('planText').textContent = String(plan.length); }
+    else if (msg.type === 'points') {
+      if (Array.isArray(msg.data)) {
+        points = msg.data || [];
+        pointsStamp = Date.now() / 1000;
+        pointsFrame = 'base_link';
+      } else {
+        points = (msg.data || {}).points || [];
+        pointsStamp = (msg.data || {}).stamp || Date.now() / 1000;
+        pointsFrame = (msg.data || {}).frame || 'base_link';
+      }
+      $('pointsText').textContent = String(points.length);
+    }
+    else if (msg.type === 'goal') latestGoal = msg.data;
+    else if (msg.type === 'nav_status') {
+      if (msg.data) $('navText').textContent = String(msg.data);
+    }
+  };
+
+  ws.onclose = () => {
+    $('wsDot').className = 'dot bad';
+    $('wsText').textContent = '断开';
+    clearTimeout(wsRetryTimer);
+    wsRetryTimer = setTimeout(connectWS, 1200);
+  };
+
+  ws.onerror = () => {
+    $('wsDot').className = 'dot warn';
+    $('wsText').textContent = '重连中';
+  };
+}
+
+function handleState(data){
+  state = data || {};
+  const odom = state.robot_pose || state.odom || {};
+  if (Number.isFinite(Number(odom.x)) && Number.isFinite(Number(odom.y))) {
+    robot.x = Number(odom.x);
+    robot.y = Number(odom.y);
+    robot.yaw = Number(odom.yaw || 0);
+    robot.valid = true;
+  }
+  const bat = state.battery || {};
+  let pct = bat.percentage;
+  if (Number.isFinite(Number(pct))) {
+    pct = Number(pct);
+    if (pct <= 1.0) pct *= 100;
+    $('batteryText').textContent = `${pct.toFixed(0)}%`;
+  }
+  $('safetyText').textContent = state.safety_state || '--';
+  $('navText').textContent = state.nav_status || '--';
+  $('poseText').textContent = robot.valid ? `${robot.x.toFixed(2)},${robot.y.toFixed(2)}` : '--,--';
+  if (state.goal) latestGoal = state.goal;
+  $('coordText').textContent = `X:${robot.x.toFixed(2)} Y:${robot.y.toFixed(2)} θ:${rad2deg(robot.yaw).toFixed(0)}°`;
+}
+
+function decodeBase64ToBytes(b64){
+  const bin = atob(b64);
+  const bytes = new Uint8ClampedArray(bin.length);
+  for (let i=0; i<bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function handleMap(data){
+  if (!data || !data.info || !data.grid) return;
+  mapInfo = data.info;
+  const w = Number(mapInfo.width);
+  const h = Number(mapInfo.height);
+  const raw = decodeBase64ToBytes(data.grid);
+  const off = document.createElement('canvas');
+  off.width = w;
+  off.height = h;
+  const offCtx = off.getContext('2d');
+  const img = offCtx.createImageData(w, h);
+
+  for (let y=0; y<h; y++) {
+    for (let x=0; x<w; x++) {
+      const srcIdx = y * w + x;
+      const dstY = h - 1 - y;
+      const dstIdx = (dstY * w + x) * 4;
+      const v = raw[srcIdx];
+      let r,g,b;
+      if (v === 255) {           // unknown (-1)
+        r=247; g=247; b=247;
+      } else if (v >= 65) {      // occupied
+        r=15; g=23; b=42;
+      } else if (v > 0) {        // inflated / uncertain
+        const c = 230 - Math.min(160, v);
+        r=c; g=c; b=c;
+      } else {                   // free
+        r=255; g=255; b=255;
+      }
+      img.data[dstIdx] = r;
+      img.data[dstIdx+1] = g;
+      img.data[dstIdx+2] = b;
+      img.data[dstIdx+3] = 255;
+    }
+  }
+  offCtx.putImageData(img, 0, 0);
+  mapCanvas = off;
+  updateView();
+  $('mapInfoText').textContent = `${w}×${h} · ${Number(mapInfo.resolution).toFixed(3)}m`;
+  $('emptyTip').style.display = 'none';
+}
+
+function resizeCanvas(){
+  const panel = $('mapPanel');
+  const dpr = window.devicePixelRatio || 1;
+  const w = panel.clientWidth;
+  const h = panel.clientHeight;
+  if (canvas.width !== Math.floor(w*dpr) || canvas.height !== Math.floor(h*dpr)) {
+    canvas.width = Math.floor(w*dpr);
+    canvas.height = Math.floor(h*dpr);
+    canvas.style.width = `${w}px`;
+    canvas.style.height = `${h}px`;
+  }
+  view.width = w;
+  view.height = h;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  updateView();
+}
+
+function updateView(){
+  if (!mapInfo || !view.width || !view.height) return;
+  const pad = Math.max(16, Math.min(view.width, view.height) * 0.035);
+  const mapW = Number(mapInfo.width);
+  const mapH = Number(mapInfo.height);
+  const sx = (view.width - pad*2) / mapW;
+  const sy = (view.height - pad*2) / mapH;
+  view.scale = Math.min(sx, sy);
+  view.offsetX = (view.width - mapW * view.scale) / 2;
+  view.offsetY = (view.height - mapH * view.scale) / 2;
+}
+
+function mapPixelFromWorld(wx, wy){
+  if (!mapInfo) return null;
+  const res = Number(mapInfo.resolution);
+  const ox = Number(mapInfo.origin_x || 0);
+  const oy = Number(mapInfo.origin_y || 0);
+  const h = Number(mapInfo.height);
+  return {
+    px: (wx - ox) / res,
+    py: h - (wy - oy) / res
+  };
+}
+
+function worldToScreen(wx, wy){
+  const p = mapPixelFromWorld(wx, wy);
+  if (!p) return null;
+  return {
+    x: view.offsetX + p.px * view.scale,
+    y: view.offsetY + p.py * view.scale
+  };
+}
+
+function screenToWorld(sx, sy){
+  if (!mapInfo) return null;
+  const res = Number(mapInfo.resolution);
+  const ox = Number(mapInfo.origin_x || 0);
+  const oy = Number(mapInfo.origin_y || 0);
+  const h = Number(mapInfo.height);
+  const px = (sx - view.offsetX) / view.scale;
+  const py = (sy - view.offsetY) / view.scale;
+  return {
+    x: ox + px * res,
+    y: oy + (h - py) * res,
+    inside: px >= 0 && py >= 0 && px <= Number(mapInfo.width) && py <= h
+  };
+}
+
+function localPointToMap(bx, by){
+  if (!robot.valid) return null;
+  const c = Math.cos(robot.yaw);
+  const s = Math.sin(robot.yaw);
+  return {
+    x: robot.x + c * bx - s * by,
+    y: robot.y + s * bx + c * by
+  };
+}
+
+function render(){
+  resizeCanvas();
+  ctx.clearRect(0,0,view.width,view.height);
+
+  // dark background grid
+  ctx.save();
+  ctx.strokeStyle = 'rgba(148,163,184,.07)';
+  ctx.lineWidth = 1;
+  for (let x=0; x<view.width; x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,view.height);ctx.stroke();}
+  for (let y=0; y<view.height; y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(view.width,y);ctx.stroke();}
+  ctx.restore();
+
+  if (mapCanvas && mapInfo) {
+    ctx.drawImage(mapCanvas, view.offsetX, view.offsetY, Number(mapInfo.width)*view.scale, Number(mapInfo.height)*view.scale);
+    ctx.strokeStyle = 'rgba(148,163,184,.38)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(view.offsetX, view.offsetY, Number(mapInfo.width)*view.scale, Number(mapInfo.height)*view.scale);
+  }
+
+  drawPlan();
+  drawPoints();
+  drawGoal(latestGoal, 'rgba(239,68,68,.95)');
+  drawGoal(selectedGoal, 'rgba(250,204,21,.95)', true);
+  drawRelocalizeCandidate();
+  drawRobot();
+
+  requestAnimationFrame(render);
+}
+
+function drawPlan(){
+  if (!mapInfo || !plan || plan.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = '#2563eb';
+  ctx.lineWidth = 3;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  let started = false;
+  for (const pt of plan) {
+    const p = worldToScreen(Number(pt[0]), Number(pt[1]));
+    if (!p) continue;
+    if (!started) { ctx.moveTo(p.x,p.y); started = true; }
+    else ctx.lineTo(p.x,p.y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawPoints(){
+  if (!mapInfo || !points || !points.length || !robot.valid) return;
+  const age = Date.now() / 1000 - pointsStamp;
+  if (age > 1.5) return; // 旧点云不画
+  ctx.save();
+  ctx.fillStyle = 'rgba(249,115,22,.85)';
+  const maxDraw = Math.min(points.length, 1400);
+  for (let i=0; i<maxDraw; i++) {
+    const pt = points[i];
+    const mp = localPointToMap(Number(pt[0]), Number(pt[1]));
+    if (!mp) continue;
+    const p = worldToScreen(mp.x, mp.y);
+    if (!p) continue;
+    ctx.fillRect(p.x-1.2, p.y-1.2, 2.4, 2.4);
+  }
+  ctx.restore();
+}
+
+function drawGoal(g, color, selected=false){
+  if (!mapInfo || !g || !Number.isFinite(Number(g.x)) || !Number.isFinite(Number(g.y))) return;
+  const p = worldToScreen(Number(g.x), Number(g.y));
+  if (!p) return;
+  const yaw = deg2rad(Number(g.yaw || 0));
+  const hx = Number(g.x) + 0.35 * Math.cos(yaw);
+  const hy = Number(g.y) + 0.35 * Math.sin(yaw);
+  const hp = worldToScreen(hx, hy);
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = selected ? 3 : 2;
+  ctx.beginPath(); ctx.arc(p.x,p.y, selected ? 8 : 6, 0, Math.PI*2); ctx.fill();
+  if (hp) { ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(hp.x,hp.y); ctx.stroke(); }
+  ctx.restore();
+}
+
+function drawRelocalizeCandidate(){
+  if (!mapInfo || !relocalizeAnchor) return;
+  const p = worldToScreen(relocalizeAnchor.x, relocalizeAnchor.y);
+  if (!p) return;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(250,204,21,.95)';
+  ctx.strokeStyle = 'rgba(250,204,21,.95)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 8, 0, Math.PI*2);
+  ctx.fill();
+
+  // 第二次点击前，用鼠标当前位置预览朝向
+  if (mouseWorld && mouseWorld.inside) {
+    const hp = worldToScreen(mouseWorld.x, mouseWorld.y);
+    if (hp) {
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(hp.x, hp.y);
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawRobot(){
+  if (!mapInfo || !robot.valid) return;
+  const p = worldToScreen(robot.x, robot.y);
+  if (!p) return;
+  const front = worldToScreen(robot.x + 0.38*Math.cos(robot.yaw), robot.y + 0.38*Math.sin(robot.yaw));
+  const left = worldToScreen(robot.x + 0.18*Math.cos(robot.yaw + 2.55), robot.y + 0.18*Math.sin(robot.yaw + 2.55));
+  const right = worldToScreen(robot.x + 0.18*Math.cos(robot.yaw - 2.55), robot.y + 0.18*Math.sin(robot.yaw - 2.55));
+
+  ctx.save();
+  ctx.fillStyle = '#4ea1ff';
+  ctx.strokeStyle = '#93c5fd';
+  ctx.lineWidth = 3;
+  if (front && left && right) {
+    ctx.beginPath();
+    ctx.moveTo(front.x, front.y);
+    ctx.lineTo(left.x, left.y);
+    ctx.lineTo(right.x, right.y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(p.x,p.y,8,0,Math.PI*2); ctx.fill(); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(78,161,255,.25)';
+  ctx.beginPath(); ctx.arc(p.x,p.y,16,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function canvasPoint(ev){
+  const rect = canvas.getBoundingClientRect();
+  return {x: ev.clientX - rect.left, y: ev.clientY - rect.top};
+}
+
+canvas.addEventListener('mousemove', (ev)=>{
+  const p = canvasPoint(ev);
+  mouseWorld = screenToWorld(p.x, p.y);
+  if (mouseWorld && mouseWorld.inside) $('coordText').textContent = `X:${mouseWorld.x.toFixed(2)} Y:${mouseWorld.y.toFixed(2)} θ:${robot.valid ? rad2deg(robot.yaw).toFixed(0) : '--'}°`;
+});
+canvas.addEventListener('pointerdown', (ev)=>{
+  if (!mapInfo) return;
+  const p = canvasPoint(ev);
+  const w = screenToWorld(p.x, p.y);
+  if (!w || !w.inside) return;
+
+  if (currentTool === 'relocalize') {
+    if (!relocalizeAnchor) {
+      relocalizeAnchor = {x: Number(w.x.toFixed(3)), y: Number(w.y.toFixed(3))};
+      selectedGoal = null;
+      toast(`已选重定位位置 X:${relocalizeAnchor.x.toFixed(2)} Y:${relocalizeAnchor.y.toFixed(2)}，再点朝向`);
+      return;
+    }
+
+    const dx = w.x - relocalizeAnchor.x;
+    const dy = w.y - relocalizeAnchor.y;
+    if (Math.hypot(dx, dy) < 0.05) {
+      toast('朝向点太近，请点远一点');
+      return;
+    }
+
+    const yawDeg = rad2deg(Math.atan2(dy, dx));
+    sendInitialPose(relocalizeAnchor.x, relocalizeAnchor.y, yawDeg);
+    return;
+  }
+
+  const yaw = Number($('goalYaw').value || (robot.valid ? rad2deg(robot.yaw) : 0));
+  selectedGoal = {x: Number(w.x.toFixed(3)), y: Number(w.y.toFixed(3)), yaw};
+  toast(`已选目标 X:${selectedGoal.x.toFixed(2)} Y:${selectedGoal.y.toFixed(2)}`);
+});
+canvas.addEventListener('dblclick', ()=>{ if (currentTool === 'goal') sendSelectedGoal(); });
+
+async function sendSelectedGoal(){
+  if (!selectedGoal) { toast('请先点击地图选择目标'); return; }
+  selectedGoal.yaw = Number($('goalYaw').value || 0);
+  try {
+    const res = await postJSON('/api/nav/goal', selectedGoal);
+    latestGoal = {...selectedGoal};
+    toast(res.message || '导航目标已发送');
+  } catch(e) { toast(`目标发送失败：${e.message}`, 2600); }
+}
+
+function setTool(tool){
+  currentTool = tool;
+  relocalizeAnchor = null;
+  selectedGoal = null;
+
+  const isReloc = tool === 'relocalize';
+  $('toolText').textContent = isReloc ? '重定位' : '目标';
+  $('relocalizeBtn').classList.toggle('active', isReloc);
+  canvas.style.cursor = isReloc ? 'copy' : 'crosshair';
+}
+
+async function startRelocalize(){
+  try { await postJSON('/api/nav/cancel', {}); } catch(e) {}
+  try { await postJSON('/api/teleop/stop', {}); } catch(e) {}
+  setTool('relocalize');
+  toast('重定位模式：先点狗当前位置，再点狗头朝向');
+}
+
+async function sendInitialPose(x, y, yaw){
+  try {
+    const res = await postJSON('/api/localization/initialpose', {x, y, yaw});
+    toast(res.message || `重定位已发送 ${x.toFixed(2)}, ${y.toFixed(2)}, ${yaw.toFixed(1)}°`, 2400);
+    points = []; pointsStamp = 0;
+    plan = []; latestGoal = null; selectedGoal = null;
+    $('pointsText').textContent = '0';
+    $('planText').textContent = '0';
+    relocalizeAnchor = null;
+    setTool('goal');
+  } catch(e) {
+    toast(`重定位失败：${e.message}`, 2800);
+  }
+}
+
+async function triggerGlobalLocalization(){
+  try {
+    await postJSON('/api/nav/cancel', {});
+  } catch(e) {}
+  try {
+    await postJSON('/api/teleop/stop', {});
+  } catch(e) {}
+  try {
+    const res = await postJSON('/api/localization/global', {});
+    toast(res.message || '已触发 AMCL 全局重定位', 2600);
+  } catch(e) {
+    toast(`全局重定位失败：${e.message}`, 3000);
+  }
+}
+
+function setupJoystick(el, knob, target){
+  const maxR = 42;
+  function setFromEvent(ev){
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width/2;
+    const cy = rect.top + rect.height/2;
+    let dx = ev.clientX - cx;
+    let dy = ev.clientY - cy;
+    const r = Math.hypot(dx,dy);
+    if (r > maxR) { dx = dx/r*maxR; dy = dy/r*maxR; }
+    target.x = dx / maxR;
+    target.y = dy / maxR;
+    knob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+  }
+  function reset(){
+    target.x = 0; target.y = 0; target.active = false;
+    knob.style.transform = 'translate(-50%,-50%)';
+    stopTeleopNow();
+  }
+  el.addEventListener('pointerdown', (ev)=>{ev.preventDefault();target.active=true;el.setPointerCapture(ev.pointerId);setFromEvent(ev);});
+  el.addEventListener('pointermove', (ev)=>{if(target.active){ev.preventDefault();setFromEvent(ev);}});
+  el.addEventListener('pointerup', reset);
+  el.addEventListener('pointercancel', reset);
+  el.addEventListener('lostpointercapture', ()=>{ if (target.active) reset(); });
+}
+
+function keyboardVector(){
+  let vx=0, vy=0, wz=0;
+  if (keys.has('w') || keys.has('arrowup')) vx += 1;
+  if (keys.has('s') || keys.has('arrowdown')) vx -= 1;
+  if (keys.has('a') || keys.has('arrowleft')) vy += 1;
+  if (keys.has('d') || keys.has('arrowright')) vy -= 1;
+  if (keys.has('q')) wz += 1;
+  if (keys.has('e')) wz -= 1;
+  const m = Math.max(1, Math.hypot(vx,vy,wz));
+  return {vx:vx/m, vy:vy/m, wz:wz/m};
+}
+
+async function sendTeleop(vx, vy, wz){
+  try { await postJSON('/api/teleop', {vx, vy, wz}); }
+  catch(e) { /* avoid spamming toast */ }
+}
+
+async function stopTeleopNow(){
+  try { await postJSON('/api/teleop/stop', {}); }
+  catch(e) { try { await postJSON('/api/teleop', {vx:0,vy:0,wz:0}); } catch(_){} }
+  lastTeleopNonZero = false;
+}
+
+function teleopLoop(){
+  const now = performance.now();
+  if (now - lastSendTs < 90) return;
+  lastSendTs = now;
+  const speed = Number($('speed').value);
+  const kb = keyboardVector();
+
+  let rawVx = (-joy.move.y) * speed + kb.vx * speed;
+  let rawVy = (-joy.move.x) * Math.min(speed, 0.5) + kb.vy * Math.min(speed, 0.5);
+  let rawWz = (-joy.turn.x) * speed + kb.wz * speed;
+
+  rawVx = clamp(rawVx, -1, 1);
+  rawVy = clamp(rawVy, -0.5, 0.5);
+  rawWz = clamp(rawWz, -1, 1);
+
+  const nonZero = Math.abs(rawVx) > 0.01 || Math.abs(rawVy) > 0.01 || Math.abs(rawWz) > 0.01;
+  if (nonZero) {
+    sendTeleop(rawVx, rawVy, rawWz);
+    lastTeleopNonZero = true;
+  } else if (lastTeleopNonZero) {
+    stopTeleopNow();
+  }
+}
+
+function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+function rad2deg(r){return r*180/Math.PI;}
+function deg2rad(d){return d*Math.PI/180;}
+
+$('speed').addEventListener('input', ()=>{$('speedText').textContent = `${Math.round(Number($('speed').value)*100)}%`;});
+$('sendGoalBtn').addEventListener('click', sendSelectedGoal);
+$('clearGoalBtn').addEventListener('click', ()=>{selectedGoal=null;relocalizeAnchor=null;setTool('goal');toast('已清除临时目标')});
+$('relocalizeBtn').addEventListener('click', startRelocalize);
+$('globalLocalizeBtn').addEventListener('click', triggerGlobalLocalization);
+$('standBtn').addEventListener('click', async()=>{try{await postJSON('/api/stand');toast('站立指令已发送')}catch(e){toast(e.message)}});
+$('lieBtn').addEventListener('click', async()=>{try{await postJSON('/api/lie');toast('趴下指令已发送')}catch(e){toast(e.message)}});
+$('passiveBtn').addEventListener('click', async()=>{try{await postJSON('/api/passive');toast('失能指令已发送')}catch(e){toast(e.message)}});
+$('estopBtn').addEventListener('click', async()=>{try{await postJSON('/api/estop');toast('急停已触发')}catch(e){toast(e.message)}});
+$('resetBtn').addEventListener('click', async()=>{try{await postJSON('/api/estop/reset');toast('急停已解除')}catch(e){toast(e.message)}});
+$('cancelNavBtn').addEventListener('click', async()=>{try{await postJSON('/api/nav/cancel');latestGoal=null;selectedGoal=null;toast('导航已取消')}catch(e){toast(e.message)}});
+$('cmdMenuBtn').addEventListener('click', ()=>{$('cmdDropdown').classList.toggle('open')});
+$('climbBtn').addEventListener('click', async()=>{try{await postJSON('/api/climb');toast('爬高楼指令已发送')}catch(e){toast(e.message)}});
+$('handshakeBtn').addEventListener('click', async()=>{try{await postJSON('/api/handshake');toast('握手指令已发送')}catch(e){toast(e.message)}});
+$('danceBtn').addEventListener('click', async()=>{try{await postJSON('/api/dance');toast('跳舞指令已发送')}catch(e){toast(e.message)}});
+
+window.addEventListener('resize', resizeCanvas);
+window.addEventListener('blur', ()=>{keys.clear(); joy.move.active=false; joy.turn.active=false; $('moveKnob').style.transform='translate(-50%,-50%)'; $('turnKnob').style.transform='translate(-50%,-50%)'; stopTeleopNow();});
+document.addEventListener('keydown', (ev)=>{
+  const k = ev.key.toLowerCase();
+  if (['w','a','s','d','q','e','arrowup','arrowdown','arrowleft','arrowright'].includes(k)) { ev.preventDefault(); keys.add(k); }
+  if (ev.code === 'Space') { ev.preventDefault(); $('estopBtn').click(); }
+  if (ev.code === 'Escape') { ev.preventDefault(); relocalizeAnchor=null; selectedGoal=null; setTool('goal'); toast('已退出当前地图工具'); }
+  if (k === 'c') { ev.preventDefault(); stopTeleopNow(); }
+});
+document.addEventListener('keyup', (ev)=>{keys.delete(ev.key.toLowerCase());});
+
+setupJoystick($('moveJoy'), $('moveKnob'), joy.move);
+setupJoystick($('turnJoy'), $('turnKnob'), joy.turn);
+connectWS();
+resizeCanvas();
+setInterval(teleopLoop, 50);
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

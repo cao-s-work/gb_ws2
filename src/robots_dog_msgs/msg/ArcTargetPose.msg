@@ -1,0 +1,13 @@
+builtin_interfaces/Time stamp
+float64 x
+float64 y
+float64 z
+float64 yaw
+float64 pitch
+float64 roll
+float64 x_tol
+float64 y_tol
+float64 z_tol
+float64 yaw_tol
+float64 pitch_tol
+float64 roll_tol

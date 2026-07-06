@@ -1,0 +1,24 @@
+[Unit]
+Description=GB钢镚 - 全链路自启动 (LiDAR + FAST-LIO + AMCL + Nav2 + Collision + Safety + Adapter + Web)
+After=gb-ip-setup.service
+Requires=gb-ip-setup.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nvidia
+Group=nvidia
+Environment="HOME=/home/nvidia"
+Environment="ROS_DOMAIN_ID=0"
+Environment="RMW_IMPLEMENTATION=rmw_fastrtps_cpp"
+ExecStart=/bin/bash /home/nvidia/gb_ws2/scripts/gb_full_chain.sh
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+KillMode=mixed
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

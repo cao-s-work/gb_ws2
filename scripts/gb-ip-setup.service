@@ -1,0 +1,13 @@
+[Unit]
+Description=GB钢镚 - LiDAR虚拟IP配置
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/nvidia/gb_ws2/scripts/gb_setup_ip.sh
+RemainAfterExit=yes
+User=root
+
+[Install]
+WantedBy=multi-user.target

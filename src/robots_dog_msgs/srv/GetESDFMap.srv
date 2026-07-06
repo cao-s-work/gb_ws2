@@ -1,0 +1,18 @@
+# Request
+bool include_gradient
+
+---
+
+# Response
+nav_msgs/OccupancyGrid map_info
+
+# 1D vector, raw first: index = y * width + x
+float64[] distance_field
+
+# Gradiant vector (optional, corresponding to distance_field index)
+# Every grid has a gradient pointing to the closest obstacle direction
+geometry_msgs/Vector3[] gradients
+
+# response status
+bool success
+string message

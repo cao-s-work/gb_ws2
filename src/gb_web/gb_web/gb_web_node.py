@@ -1,0 +1,973 @@
+#!/usr/bin/env python3
+"""
+gb_web — 钢镚机器人 Web 控制端 ROS2 节点 (Phase 10.2: 地图导航可视化)
+
+功能:
+  1. HTTP 静态页面服务 (aiohttp)
+  2. WebSocket 分类型状态推送:
+     - state:  safety/odom/battery/lifecycle (3Hz)
+     - map:    OccupancyGrid (变化时推送, base64 编码)
+     - plan:   全局路径 (变化时推送)
+     - points: 降采样点云 (2Hz, 最多 2000 点)
+     - goal:   最新目标点
+     - nav_status: 导航状态
+  3. REST API: /api/state, /api/nav/goal, /api/nav/cancel, /api/estop, /api/estop/reset, /api/teleop
+  4. Web 手动遥控 heartbeat (500ms 超时归零)
+  5. 点击地图设置目标 (前端坐标转换 → /api/nav/goal)
+
+安全链路:
+  Web /cmd_vel_web → safety_node → /cmd_vel_base → mock base
+"""
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+from rclpy.action import ActionClient
+from std_msgs.msg import Bool, String
+from geometry_msgs.msg import Twist, PoseStamped, PoseWithCovarianceStamped
+from nav_msgs.msg import Odometry, OccupancyGrid, Path
+from sensor_msgs.msg import BatteryState, PointCloud2
+from nav2_msgs.action import NavigateToPose
+from std_srvs.srv import Trigger, Empty
+from lifecycle_msgs.srv import GetState
+from aiohttp import web, WSMsgType
+import asyncio
+import json
+import math
+import os
+import time
+import struct
+import base64
+import threading
+from array import array
+
+
+class GbWebNode(Node):
+    """ROS2 节点 + aiohttp Web 服务器"""
+
+    def __init__(self):
+        super().__init__('gb_web_node')
+
+        # ---- 参数 ----
+        self.declare_parameter('port', 8080)
+        self.declare_parameter('web_dir', '')
+        self.declare_parameter('cmd_vel_web_topic', '/cmd_vel_web')
+        self.declare_parameter('teleop_timeout', 0.5)
+        self.declare_parameter('max_points', 1000)  # 点云降采样上限 (Phase 10.2.1 优化: 2000→1000)
+
+        self._port = self.get_parameter('port').value
+        self._web_dir = self.get_parameter('web_dir').value
+        if not self._web_dir:
+            from ament_index_python.packages import get_package_share_directory
+            self._web_dir = os.path.join(
+                get_package_share_directory('gb_web'), 'www')
+        self._teleop_timeout = self.get_parameter('teleop_timeout').value
+        self._max_points = self.get_parameter('max_points').value
+
+        # ---- 状态 ----
+        self._safety_state = 'UNKNOWN'
+        self._odom_x = 0.0
+        self._odom_y = 0.0
+        self._odom_yaw = 0.0
+        self._odom_vx = 0.0
+        self._odom_wz = 0.0
+        # AMCL 位姿 (map 帧) — 用于 Web 地图显示
+        self._amcl_x = 0.0
+        self._amcl_y = 0.0
+        self._amcl_yaw = 0.0
+        self._battery_pct = 0.0
+        self._battery_volt = 0.0
+        self._lifecycle_states = {}
+        self._last_teleop_time = 0.0
+        self._teleop_active = False
+        self._ws_clients = set()
+
+        # 地图
+        self._map_data = None  # base64 encoded
+        self._map_info = None  # {resolution, width, height, origin_x, origin_y}
+        self._map_seq = 0
+
+        # 路径
+        self._plan_points = []  # [[x,y], ...]
+        self._plan_seq = 0
+        self._last_pushed_plan_seq = 0  # 用于检测 plan 变化推送
+
+        # 点云
+        self._points_2d = []  # [[x,y], ...] 降采样后
+        self._last_points_push = 0.0
+
+        # 目标点
+        self._latest_goal = None  # {x, y, yaw}
+
+        # 导航状态
+        self._nav_status = 'idle'  # idle / navigating / cancelled / failed / succeeded
+        self._nav_goal_active = False  # Phase 10.3: 跟踪是否有活跃的 Nav2 goal
+
+        # ---- ROS2 通信 ----
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            depth=1
+        )
+
+        # 发布
+        # /cmd_vel_web 使用 RELIABLE QoS (Phase 5.1: WiFi 稳定)
+        cmd_vel_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            depth=10
+        )
+        self._cmd_vel_web_pub = self.create_publisher(
+            Twist, self.get_parameter('cmd_vel_web_topic').value, cmd_vel_qos)
+        self._estop_pub = self.create_publisher(Bool, '/emergency_stop', 10)
+        # Web 重定位：发布 AMCL 初始位姿
+        self._initialpose_pub = self.create_publisher(
+            PoseWithCovarianceStamped, '/initialpose', 10)
+
+
+        # 订阅状态
+        self.create_subscription(String, '/safety_state',
+                                 self._safety_state_cb, 10)
+        # FAST-LIO 发布 odom 到 /Odometry（大写 O），不是 /lio_odom
+        self.create_subscription(Odometry, '/Odometry',
+                                 self._odom_cb, sensor_qos)
+        # AMCL 位姿 (map 帧) — 用于 Web 地图显示机器人位置
+        # AMCL 发布 amcl_pose 使用 RELIABLE + TRANSIENT_LOCAL QoS
+        amcl_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=1
+        )
+        self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose',
+                                 self._amcl_cb, amcl_qos)
+        self.create_subscription(BatteryState, '/battery_state',
+                                 self._battery_cb, 10)
+
+        # 订阅地图 (TRANSIENT_LOCAL QoS for latched map)
+        map_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=1
+        )
+        self.create_subscription(OccupancyGrid, '/map',
+                                 self._map_cb, map_qos)
+
+        # 订阅路径
+        self.create_subscription(Path, '/plan',
+                                 self._plan_cb, 10)
+
+        # 订阅点云
+        self.create_subscription(PointCloud2, '/points_nav',
+                                 self._points_cb, sensor_qos)
+
+        # Nav2 action client
+        self._nav_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
+
+        # lifecycle clients
+        self._lifecycle_nodes = [
+            'map_server', 'planner_server', 'controller_server',
+            'smoother_server', 'behavior_server', 'bt_navigator',
+            'velocity_smoother', 'collision_monitor'
+        ]
+        self._lifecycle_clients = {}
+        for node_name in self._lifecycle_nodes:
+            self._lifecycle_clients[node_name] = self.create_client(
+                GetState, f'/{node_name}/get_state')
+
+        # Service clients
+        self._reset_estop_client = self.create_client(Trigger, '/gb_safety/reset_estop')
+        self._stand_client = self.create_client(Trigger, '/gb_base/stand_up')
+        self._lie_client = self.create_client(Trigger, '/gb_base/lie_down')
+        self._passive_client = self.create_client(Trigger, '/gb_base/passive')
+        from action_msgs.srv import CancelGoal
+        self._cancel_goal_client = self.create_client(
+            CancelGoal, '/navigate_to_pose/_action/cancel_goal')
+        # AMCL 全局重定位服务
+        self._global_localization_client = self.create_client(
+            Empty, '/reinitialize_global_localization')
+
+
+        # 定时器
+        self._teleop_timer = self.create_timer(0.02, self._teleop_watchdog)
+        self._lifecycle_timer = self.create_timer(1.0, self._poll_lifecycle)
+        self._ws_timer = self.create_timer(0.33, self._push_periodic)  # 3Hz state
+
+        self.get_logger().info(
+            f'gb_web_node 启动 — port={self._port}, web_dir={self._web_dir}')
+
+    # ---- ROS2 回调 ----
+
+    def _safety_state_cb(self, msg: String):
+        self._safety_state = msg.data
+
+    def _odom_cb(self, msg: Odometry):
+        self._odom_vx = msg.twist.twist.linear.x
+        self._odom_wz = msg.twist.twist.angular.z
+
+    def _amcl_cb(self, msg: PoseWithCovarianceStamped):
+        self._amcl_x = msg.pose.pose.position.x
+        self._amcl_y = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        self._amcl_yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    def _battery_cb(self, msg: BatteryState):
+        self._battery_pct = msg.percentage
+        self._battery_volt = msg.voltage
+
+    def _map_cb(self, msg: OccupancyGrid):
+        """地图回调 — base64 编码"""
+        info = msg.info
+        self._map_info = {
+            'resolution': info.resolution,
+            'width': info.width,
+            'height': info.height,
+            'origin_x': info.origin.position.x,
+            'origin_y': info.origin.position.y,
+        }
+        # 编码栅格数据: int8[] → bytes → base64
+        raw = bytes([b & 0xFF for b in msg.data])
+        self._map_data = base64.b64encode(raw).decode('ascii')
+        self._map_seq += 1
+        self.get_logger().info(
+            f'地图更新: {info.width}x{info.height}, '
+            f'resolution={info.resolution}, {len(raw)} bytes')
+        # 🔧 收到新地图立即推送到 WebSocket
+        self._push_map_to_ws()
+
+    def _plan_cb(self, msg: Path):
+        """路径回调"""
+        self._plan_points = []
+        for pose in msg.poses:
+            self._plan_points.append([
+                round(pose.pose.position.x, 3),
+                round(pose.pose.position.y, 3)
+            ])
+        self._plan_seq += 1
+
+    def _points_cb(self, msg: PointCloud2):
+        """点云回调 — 降采样到最多 max_points 点, 只取 x,y
+        Phase 10.2.1 优化: 仅在有 WebSocket 客户端连接时解析"""
+        if not self._ws_clients:
+            return  # 无客户端连接时跳过点云解析，降低 CPU
+        if msg.width == 0 or msg.height == 0:
+            return
+
+        n_points = msg.width * msg.height
+        point_step = msg.point_step
+        data = msg.data
+
+        # 查找 x, y 字段偏移
+        x_offset = y_offset = None
+        for field in msg.fields:
+            if field.name == 'x':
+                x_offset = field.offset
+            elif field.name == 'y':
+                y_offset = field.offset
+
+        if x_offset is None or y_offset is None:
+            return
+
+        # 降采样步长
+        stride = max(1, n_points // self._max_points)
+
+        points = []
+        for i in range(0, n_points, stride):
+            offset = i * point_step
+            try:
+                x = struct.unpack_from('f', data, offset + x_offset)[0]
+                y = struct.unpack_from('f', data, offset + y_offset)[0]
+                # 过滤 NaN/Inf
+                if math.isfinite(x) and math.isfinite(y):
+                    points.append([round(x, 3), round(y, 3)])
+            except (struct.error, IndexError):
+                continue
+
+        self._points_2d = points
+
+    def _poll_lifecycle(self):
+        for node_name, client in self._lifecycle_clients.items():
+            if client.service_is_ready():
+                future = client.call_async(GetState.Request())
+                future.add_done_callback(
+                    lambda f, n=node_name: self._lifecycle_cb(n, f))
+
+    def _lifecycle_cb(self, node_name, future):
+        try:
+            result = future.result()
+            if result and result.current_state:
+                self._lifecycle_states[node_name] = {
+                    'id': result.current_state.id,
+                    'label': result.current_state.label
+                }
+        except Exception:
+            pass
+
+    def _teleop_watchdog(self):
+        if self._teleop_active:
+            elapsed = time.time() - self._last_teleop_time
+            if elapsed > self._teleop_timeout:
+                self._publish_cmd_vel_web(0.0, 0.0, 0.0)
+                self._teleop_active = False
+
+    def _publish_cmd_vel_web(self, vx: float, vy: float, wz: float):
+        try:
+            msg = Twist()
+            msg.linear.x = float(vx)
+            msg.linear.y = float(vy)
+            msg.angular.z = float(wz)
+            self._cmd_vel_web_pub.publish(msg)
+        except Exception:
+            pass  # Fast-DDS 跨线程崩溃防护
+
+    # ---- WebSocket 推送 ----
+
+    def _push_periodic(self):
+        """3Hz 推送 state + 高频数据"""
+        if not self._ws_clients:
+            return
+
+        # state 消息
+        state_msg = {
+            'type': 'state',
+            'data': self._build_state()
+        }
+        self._broadcast(state_msg)
+
+        # points 消息 (限制 1Hz, 含时间戳 Phase 10.4)
+        now = time.time()
+        if now - self._last_points_push > 1.0 and self._points_2d:
+            points_msg = {
+                'type': 'points',
+                'data': {
+                    'frame': 'base_link',
+                    'stamp': now,
+                    'points': self._points_2d
+                }
+            }
+            self._broadcast(points_msg)
+            self._last_points_push = now
+
+        # plan 自动推送 (plan_seq 变化时)
+        if self._plan_seq != self._last_pushed_plan_seq and self._plan_points:
+            self._push_plan_to_ws()
+            self._last_pushed_plan_seq = self._plan_seq
+
+    def _broadcast(self, msg_dict):
+        """向所有 WebSocket 客户端推送消息"""
+        msg_str = json.dumps(msg_dict)
+        for ws in list(self._ws_clients):
+            if not ws.closed:
+                asyncio.run_coroutine_threadsafe(
+                    ws.send_str(msg_str), self._aio_loop)
+
+    def _build_state(self):
+        return {
+            'timestamp': time.time(),
+            'safety_state': self._safety_state,
+            'nav_status': self._nav_status,
+            'nav_goal_active': self._nav_goal_active,  # Phase 10.3
+            'robot_pose': {
+                'frame': 'map',
+                'x': round(self._amcl_x, 3),
+                'y': round(self._amcl_y, 3),
+                'yaw': round(self._amcl_yaw, 3)
+            },
+            'odom_velocity': {
+                'vx': round(self._odom_vx, 3),
+                'wz': round(self._odom_wz, 3)
+            },
+            'odom': {  # 兼容保留
+                'x': round(self._amcl_x, 3),
+                'y': round(self._amcl_y, 3),
+                'yaw': round(self._amcl_yaw, 3),
+                'vx': round(self._odom_vx, 3),
+                'wz': round(self._odom_wz, 3)
+            },
+            'battery': {
+                'percentage': round(self._battery_pct, 3),
+                'voltage': round(self._battery_volt, 2)
+            },
+            'lifecycle': self._lifecycle_states,
+            'teleop_active': self._teleop_active,
+            'goal': self._latest_goal,
+            'plan_seq': self._plan_seq,
+            'map_seq': self._map_seq,
+        }
+
+    # ---- Web 服务器 ----
+
+    def _push_map_to_ws(self):
+        """推送完整地图"""
+        if self._map_data and self._map_info:
+            self._broadcast({
+                'type': 'map',
+                'data': {
+                    'info': self._map_info,
+                    'grid': self._map_data
+                }
+            })
+
+    def _push_plan_to_ws(self):
+        """推送路径"""
+        self._broadcast({
+            'type': 'plan',
+            'data': self._plan_points
+        })
+
+    def _push_goal_to_ws(self):
+        """推送目标点"""
+        self._broadcast({
+            'type': 'goal',
+            'data': self._latest_goal
+        })
+
+    async def _ws_handler(self, request):
+        ws = web.WebSocketResponse(max_msg_size=0)
+        await ws.prepare(request)
+        self._ws_clients.add(ws)
+        # 确保 aio_loop 是 aiohttp 的事件循环
+        self._aio_loop = asyncio.get_event_loop()
+        self.get_logger().info(f'WebSocket 连接: {request.remote}')
+
+        try:
+            # 发送当前所有状态
+            await ws.send_str(json.dumps({
+                'type': 'state', 'data': self._build_state()}))
+
+            # 推送地图
+            if self._map_data:
+                await ws.send_str(json.dumps({
+                    'type': 'map',
+                    'data': {'info': self._map_info, 'grid': self._map_data}
+                }))
+
+            # 推送路径
+            if self._plan_points:
+                await ws.send_str(json.dumps({
+                    'type': 'plan', 'data': self._plan_points}))
+
+            # 监听客户端消息 (用于 plan_seq 变化检测)
+            async for msg in ws:
+                if msg.type == WSMsgType.TEXT:
+                    try:
+                        req = json.loads(msg.data)
+                        if req.get('type') == 'get_map':
+                            if self._map_data:
+                                await ws.send_str(json.dumps({
+                                    'type': 'map',
+                                    'data': {'info': self._map_info,
+                                             'grid': self._map_data}
+                                }))
+                        elif req.get('type') == 'get_plan':
+                            await ws.send_str(json.dumps({
+                                'type': 'plan', 'data': self._plan_points}))
+                    except json.JSONDecodeError:
+                        pass
+        except Exception as e:
+            self.get_logger().warn(f'WebSocket 错误: {e}')
+        finally:
+            self._ws_clients.discard(ws)
+            self.get_logger().info(f'WebSocket 断开: {request.remote}')
+            # 不在此呼 publish — watchdog 会在超时后自动归零
+
+        return ws
+
+    async def _handle_initialpose(self, request):
+        """
+        Web 手动重定位：
+        前端传入 map 坐标 x/y/yaw_deg，后端发布 /initialpose 给 AMCL。
+        """
+        try:
+            data = await request.json()
+            x = float(data.get('x', 0.0))
+            y = float(data.get('y', 0.0))
+            yaw_deg = float(data.get('yaw', data.get('yaw_deg', 0.0)))
+            yaw_rad = math.radians(yaw_deg)
+
+            # 重定位前先确保不会继续执行旧目标或旧遥控速度
+            if self._nav_goal_active:
+                await self._cancel_nav_goal_internal()
+            self._publish_cmd_vel_web(0.0, 0.0, 0.0)
+            self._teleop_active = False
+            self._latest_goal = None
+            self._nav_goal_active = False
+            self._nav_status = 'localizing'
+            self._push_goal_to_ws()
+
+            msg = PoseWithCovarianceStamped()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'map'
+            msg.pose.pose.position.x = x
+            msg.pose.pose.position.y = y
+            msg.pose.pose.position.z = 0.0
+            msg.pose.pose.orientation.z = math.sin(yaw_rad / 2.0)
+            msg.pose.pose.orientation.w = math.cos(yaw_rad / 2.0)
+
+            # 初始位姿协方差：x/y 标准差 0.25m，yaw 标准差 15°
+            cov = [0.0] * 36
+            cov[0] = 0.25 * 0.25
+            cov[7] = 0.25 * 0.25
+            cov[35] = math.radians(15.0) ** 2
+            msg.pose.covariance = cov
+
+            # 连续发布 3 次，提升 Web/AMCL 启动或 DDS 抖动时的可靠性
+            for _ in range(3):
+                msg.header.stamp = self.get_clock().now().to_msg()
+                self._initialpose_pub.publish(msg)
+                await asyncio.sleep(0.05)
+
+            self.get_logger().info(
+                f'📍 Web 重定位: x={x:.3f}, y={y:.3f}, yaw={yaw_deg:.1f}°')
+
+            return web.json_response({
+                'ok': True,
+                'message': 'initialpose published',
+                'x': x,
+                'y': y,
+                'yaw': yaw_deg
+            })
+        except Exception as e:
+            self.get_logger().error(f'initialpose error: {e}')
+            return web.json_response({'ok': False, 'error': str(e)}, status=400)
+
+    async def _handle_global_localization(self, request):
+        """
+        调用 AMCL 全局重定位。
+        注意：会让粒子散到全图，通常需要原地小幅旋转/移动帮助重新收敛。
+        """
+        try:
+            if self._nav_goal_active:
+                await self._cancel_nav_goal_internal()
+            self._publish_cmd_vel_web(0.0, 0.0, 0.0)
+            self._teleop_active = False
+            self._latest_goal = None
+            self._nav_goal_active = False
+            self._push_goal_to_ws()
+
+            if not self._global_localization_client.service_is_ready():
+                return web.json_response(
+                    {'ok': False, 'error': 'global localization service not ready'},
+                    status=503)
+
+            loop = asyncio.get_event_loop()
+            aio_future = loop.create_future()
+
+            def _on_done(rclpy_future):
+                if not aio_future.done():
+                    result = rclpy_future.result()
+                    loop.call_soon_threadsafe(aio_future.set_result, result)
+
+            future = self._global_localization_client.call_async(Empty.Request())
+            future.add_done_callback(_on_done)
+
+            try:
+                await asyncio.wait_for(aio_future, timeout=3.0)
+            except asyncio.TimeoutError:
+                return web.json_response(
+                    {'ok': False, 'error': 'global localization timeout'},
+                    status=504)
+
+            self._nav_status = 'global_localizing'
+            self.get_logger().warn('🌐 Web 触发 AMCL 全局重定位')
+            return web.json_response({
+                'ok': True,
+                'message': 'global localization triggered'
+            })
+        except Exception as e:
+            self.get_logger().error(f'global localization error: {e}')
+            return web.json_response({'ok': False, 'error': str(e)}, status=400)
+
+    async def _handle_state(self, request):
+        return web.json_response(self._build_state())
+
+    async def _handle_nav_goal(self, request):
+        try:
+            data = await request.json()
+            if 'ESTOP' in str(self._safety_state).upper():
+                return web.json_response(
+                    {'ok': False, 'error': '当前处于急停状态，请先点击"解急停"后再发送导航目标'},
+                    status=409)
+            x = float(data.get('x', 0.0))
+            y = float(data.get('y', 0.0))
+            yaw_deg = float(data.get('yaw', 0.0))
+            yaw_rad = math.radians(yaw_deg)
+
+            # 保存目标
+            self._latest_goal = {'x': x, 'y': y, 'yaw': yaw_deg}
+            self._nav_status = 'navigating'
+            self._push_goal_to_ws()
+
+            goal = NavigateToPose.Goal()
+            goal.pose.header.frame_id = 'map'
+            goal.pose.header.stamp = self.get_clock().now().to_msg()
+            goal.pose.pose.position.x = x
+            goal.pose.pose.position.y = y
+            goal.pose.pose.position.z = 0.0
+            goal.pose.pose.orientation.z = math.sin(yaw_rad / 2)
+            goal.pose.pose.orientation.w = math.cos(yaw_rad / 2)
+
+            if not self._nav_client.wait_for_server(timeout_sec=2.0):
+                return web.json_response(
+                    {'ok': False, 'error': 'Nav2 action server not available'},
+                    status=503)
+
+            loop = asyncio.get_event_loop()
+            aio_future = loop.create_future()
+
+            def _on_done(rclpy_future):
+                if not aio_future.done():
+                    result = rclpy_future.result()
+                    loop.call_soon_threadsafe(aio_future.set_result, result)
+
+            send_future = self._nav_client.send_goal_async(goal)
+            send_future.add_done_callback(_on_done)
+
+            try:
+                goal_handle = await asyncio.wait_for(aio_future, timeout=5.0)
+            except asyncio.TimeoutError:
+                return web.json_response(
+                    {'ok': False, 'error': 'Nav2 goal send timeout'},
+                    status=504)
+
+            if goal_handle and goal_handle.accepted:
+                self._nav_status = 'navigating'
+                self._nav_goal_active = True  # Phase 10.3
+                # 注册结果回调
+                result_future = goal_handle.get_result_async()
+                result_future.add_done_callback(
+                    lambda f: self._on_nav_result(f))
+                return web.json_response(
+                    {'ok': True,
+                     'goal_id': bytes(goal_handle.goal_id.uuid).hex(),
+                     'message': 'Goal accepted'})
+            else:
+                self._nav_status = 'failed'
+                return web.json_response(
+                    {'ok': False, 'error': 'Goal rejected'},
+                    status=400)
+        except Exception as e:
+            self.get_logger().error(f'Nav goal error: {e}')
+            return web.json_response(
+                {'ok': False, 'error': str(e)}, status=500)
+
+    async def _handle_nav_cancel(self, request):
+        try:
+            from action_msgs.srv import CancelGoal
+            if not self._cancel_goal_client.service_is_ready():
+                return web.json_response(
+                    {'ok': False, 'error': 'Cancel service not ready'},
+                    status=503)
+
+            self._nav_status = 'cancelled'
+            self._nav_goal_active = False  # Phase 10.3
+            self._latest_goal = None
+            self._push_goal_to_ws()
+
+            req = CancelGoal.Request()
+            loop = asyncio.get_event_loop()
+            aio_future = loop.create_future()
+
+            def _on_cancel_done(rclpy_future):
+                if not aio_future.done():
+                    result = rclpy_future.result()
+                    loop.call_soon_threadsafe(aio_future.set_result, result)
+
+            future = self._cancel_goal_client.call_async(req)
+            future.add_done_callback(_on_cancel_done)
+
+            try:
+                result = await asyncio.wait_for(aio_future, timeout=3.0)
+            except asyncio.TimeoutError:
+                return web.json_response(
+                    {'ok': False, 'error': 'Cancel timeout'}, status=504)
+
+            return web.json_response(
+                {'ok': True, 'message': 'Cancel sent',
+                 'goals_cancelled': len(result.goals_canceling) if result else 0})
+        except Exception as e:
+            return web.json_response(
+                {'ok': False, 'error': str(e)}, status=500)
+
+    async def _handle_estop(self, request):
+        msg = Bool()
+        msg.data = True
+        self._estop_pub.publish(msg)
+        self._publish_cmd_vel_web(0.0, 0.0, 0.0)
+        self._teleop_active = False
+        self._nav_status = 'estop'
+        self.get_logger().warn('🔴 Web 急停触发')
+        return web.json_response({'ok': True, 'message': 'Emergency stop activated'})
+
+    async def _handle_estop_reset(self, request):
+        msg = Bool()
+        msg.data = False
+        self._estop_pub.publish(msg)
+        await asyncio.sleep(0.1)
+
+        if not self._reset_estop_client.service_is_ready():
+            return web.json_response(
+                {'ok': False, 'error': 'reset_estop service not ready'},
+                status=503)
+
+        loop = asyncio.get_event_loop()
+        aio_future = loop.create_future()
+
+        def _on_done(rclpy_future):
+            if not aio_future.done():
+                result = rclpy_future.result()
+                loop.call_soon_threadsafe(aio_future.set_result, result)
+
+        call_future = self._reset_estop_client.call_async(Trigger.Request())
+        call_future.add_done_callback(_on_done)
+
+        try:
+            result = await asyncio.wait_for(aio_future, timeout=5.0)
+        except asyncio.TimeoutError:
+            return web.json_response(
+                {'ok': False, 'error': 'reset_estop timeout'}, status=504)
+
+        if result and result.success:
+            self._nav_status = 'idle'
+            self.get_logger().info('🟢 Web 解除急停')
+            return web.json_response(
+                {'ok': True, 'message': result.message})
+        else:
+            return web.json_response(
+                {'ok': False,
+                 'error': result.message if result else 'Service call failed'},
+                status=400)
+
+    async def _handle_teleop(self, request):
+        try:
+            data = await request.json()
+            raw_vx = float(data.get('vx', 0.0))
+            raw_vy = float(data.get('vy', 0.0))
+            raw_wz = float(data.get('wz', 0.0))
+
+            # MCU 死区 aware 摇杆映射:
+            # - 摇杆 deadband: |input| < 0.02 (vx) / 0.05 (wz) → 0
+            # - 轻推即输出至少死区下限 0.05 m/s / 0.10 rad/s
+            # - 松开输出 0
+            # ⚠️ 三轴 MCU 死区不同 (阶段 7 落地实测)
+            # vy 有效阈值 0.12–0.15，vx 仅 0.05 — ZSL-1W 硬件特性，不可统一
+            DEADBAND_VX = 0.02
+            DEADBAND_VY = 0.02
+            DEADBAND_WZ = 0.05
+            MAX_VX = 0.80
+            MAX_VY = 0.50
+            MAX_WZ = 1.00
+            MIN_OUT_VX = 0.05   # MCU vx 最小有效速度
+            MIN_OUT_VY = 0.15   # MCU vy 最小有效速度 (横向死区比纵向高)
+            MIN_OUT_WZ = 0.10   # MCU wz 最小有效速度
+
+            if abs(raw_vx) < DEADBAND_VX:
+                vx = 0.0
+            else:
+                scale = (abs(raw_vx) - DEADBAND_VX) / (MAX_VX - DEADBAND_VX)
+                vx = math.copysign(MIN_OUT_VX + scale * (MAX_VX - MIN_OUT_VX), raw_vx)
+                vx = max(-MAX_VX, min(MAX_VX, vx))
+
+            # vy (lateral) — 独立死区/最小输出 (MCU 横向死区 0.12-0.15)
+            if abs(raw_vy) < DEADBAND_VY:
+                vy = 0.0
+            else:
+                scale = (abs(raw_vy) - DEADBAND_VY) / (MAX_VY - DEADBAND_VY)
+                vy = math.copysign(MIN_OUT_VY + scale * (MAX_VY - MIN_OUT_VY), raw_vy)
+                vy = max(-MAX_VY, min(MAX_VY, vy))
+
+            if abs(raw_wz) < DEADBAND_WZ:
+                wz = 0.0
+            else:
+                scale = (abs(raw_wz) - DEADBAND_WZ) / (MAX_WZ - DEADBAND_WZ)
+                wz = math.copysign(MIN_OUT_WZ + scale * (MAX_WZ - MIN_OUT_WZ), raw_wz)
+                wz = max(-MAX_WZ, min(MAX_WZ, wz))
+
+            # Phase 10.3: 非零速度时自动 cancel 当前 Nav2 goal
+            if (vx != 0.0 or vy != 0.0 or wz != 0.0) and self._nav_goal_active:
+                self.get_logger().info('🎮 Web 遥控启动 — 自动取消 Nav2 goal')
+                await self._cancel_nav_goal_internal()
+
+            self._publish_cmd_vel_web(vx, vy, wz)
+            self._last_teleop_time = time.time()
+            self._teleop_active = True
+            return web.json_response(
+                {'ok': True, 'vx': vx, 'vy': vy, 'wz': wz,
+                 'raw_vx': raw_vx, 'raw_vy': raw_vy, 'raw_wz': raw_wz})
+        except Exception as e:
+            return web.json_response(
+                {'ok': False, 'error': str(e)}, status=400)
+
+    async def _handle_teleop_stop(self, request):
+        self._publish_cmd_vel_web(0.0, 0.0, 0.0)
+        self._teleop_active = False
+        return web.json_response({'ok': True, 'message': 'Teleop stopped'})
+
+    async def _handle_stand(self, request):
+        """站立 — 调用 /gb_base/stand_up 服务"""
+        if not self._stand_client.service_is_ready():
+            return web.json_response({'ok': False, 'error': 'stand_up service not ready'}, status=503)
+        loop = asyncio.get_event_loop()
+        aio_future = loop.create_future()
+        def _on_done(rclpy_future):
+            if not aio_future.done():
+                result = rclpy_future.result()
+                loop.call_soon_threadsafe(aio_future.set_result, result)
+        call_future = self._stand_client.call_async(Trigger.Request())
+        call_future.add_done_callback(_on_done)
+        try:
+            result = await asyncio.wait_for(aio_future, timeout=15.0)
+        except asyncio.TimeoutError:
+            return web.json_response({'ok': False, 'error': 'stand_up timeout'}, status=504)
+        return web.json_response({'ok': result.success, 'message': result.message})
+
+    async def _handle_lie(self, request):
+        """趴下 — 调用 /gb_base/lie_down 服务"""
+        if not self._lie_client.service_is_ready():
+            return web.json_response({'ok': False, 'error': 'lie_down service not ready'}, status=503)
+        loop = asyncio.get_event_loop()
+        aio_future = loop.create_future()
+        def _on_done(rclpy_future):
+            if not aio_future.done():
+                result = rclpy_future.result()
+                loop.call_soon_threadsafe(aio_future.set_result, result)
+        call_future = self._lie_client.call_async(Trigger.Request())
+        call_future.add_done_callback(_on_done)
+        try:
+            result = await asyncio.wait_for(aio_future, timeout=15.0)
+        except asyncio.TimeoutError:
+            return web.json_response({'ok': False, 'error': 'lie_down timeout'}, status=504)
+        return web.json_response({'ok': result.success, 'message': result.message})
+
+    async def _handle_passive(self, request):
+        """失能 — 调用 /gb_base/passive 服务"""
+        if not self._passive_client.service_is_ready():
+            return web.json_response({'ok': False, 'error': 'passive service not ready'}, status=503)
+        loop = asyncio.get_event_loop()
+        aio_future = loop.create_future()
+        def _on_done(rclpy_future):
+            if not aio_future.done():
+                result = rclpy_future.result()
+                loop.call_soon_threadsafe(aio_future.set_result, result)
+        call_future = self._passive_client.call_async(Trigger.Request())
+        call_future.add_done_callback(_on_done)
+        try:
+            result = await asyncio.wait_for(aio_future, timeout=15.0)
+        except asyncio.TimeoutError:
+            return web.json_response({'ok': False, 'error': 'passive timeout'}, status=504)
+        return web.json_response({'ok': result.success, 'message': result.message})
+
+    async def _handle_climb(self, request):
+        """爬高楼 — TODO: 接入 SDK 爬楼指令"""
+        return web.json_response({'ok': False, 'message': '爬楼功能待接入 SDK'})
+
+    async def _handle_handshake(self, request):
+        """握手 — TODO: 接入 SDK 握手指令"""
+        return web.json_response({'ok': False, 'message': '握手功能待接入 SDK'})
+
+    async def _handle_dance(self, request):
+        """跳舞 — TODO: 接入 SDK 跳舞指令"""
+        return web.json_response({'ok': False, 'message': '跳舞功能待接入 SDK'})
+
+    async def _cancel_nav_goal_internal(self):
+        """Phase 10.3: 内部取消 Nav2 goal (不返回 HTTP 响应)"""
+        if not self._nav_goal_active:
+            return
+
+        from action_msgs.srv import CancelGoal
+        if self._cancel_goal_client.service_is_ready():
+            req = CancelGoal.Request()
+            loop = asyncio.get_event_loop()
+            aio_future = loop.create_future()
+
+            def _on_cancel(rclpy_future):
+                if not aio_future.done():
+                    result = rclpy_future.result()
+                    loop.call_soon_threadsafe(aio_future.set_result, result)
+
+            future = self._cancel_goal_client.call_async(req)
+            future.add_done_callback(_on_cancel)
+
+            try:
+                await asyncio.wait_for(aio_future, timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+
+        self._nav_goal_active = False
+        self._nav_status = 'cancelled'
+        self._latest_goal = None
+        self._push_goal_to_ws()
+        self.get_logger().info('✅ Nav2 goal 已取消 (teleop 仲裁)')
+
+    def _on_nav_result(self, future):
+        """导航结果回调"""
+        try:
+            result = future.result()
+            self._nav_goal_active = False  # Phase 10.3: goal 结束
+            if result and result.status == 4:  # STATUS_SUCCEEDED
+                self._nav_status = 'succeeded'
+                self.get_logger().info('✅ 导航完成')
+            else:
+                self._nav_status = 'failed'
+                self.get_logger().info(f'❌ 导航结束: status={result.status if result else "None"}')
+        except Exception as e:
+            self._nav_goal_active = False
+            self._nav_status = 'failed'
+            self.get_logger().error(f'导航结果异常: {e}')
+
+    def _create_app(self):
+        app = web.Application()
+
+        app.router.add_get('/ws', self._ws_handler)
+        app.router.add_get('/api/state', self._handle_state)
+        app.router.add_post('/api/nav/goal', self._handle_nav_goal)
+        app.router.add_post('/api/nav/cancel', self._handle_nav_cancel)
+        app.router.add_post('/api/localization/initialpose', self._handle_initialpose)
+        app.router.add_post('/api/localization/global', self._handle_global_localization)
+        app.router.add_post('/api/estop', self._handle_estop)
+        app.router.add_post('/api/estop/reset', self._handle_estop_reset)
+        app.router.add_post('/api/teleop', self._handle_teleop)
+        app.router.add_post('/api/teleop/stop', self._handle_teleop_stop)
+        app.router.add_post('/api/stand', self._handle_stand)
+        app.router.add_post('/api/lie', self._handle_lie)
+        app.router.add_post('/api/passive', self._handle_passive)
+        app.router.add_post('/api/climb', self._handle_climb)
+        app.router.add_post('/api/handshake', self._handle_handshake)
+        app.router.add_post('/api/dance', self._handle_dance)
+
+        index_path = os.path.join(self._web_dir, 'index.html')
+        if os.path.isfile(index_path):
+            async def _index(request):
+                return web.FileResponse(index_path)
+            app.router.add_get('/', _index)
+
+        if os.path.isdir(self._web_dir):
+            app.router.add_static('/', self._web_dir, show_index=False)
+
+        return app
+
+
+def spin_thread(node):
+    rclpy.spin(node)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = GbWebNode()
+
+    t = threading.Thread(target=spin_thread, args=(node,), daemon=True)
+    t.start()
+
+    app = node._create_app()
+    node._aio_loop = asyncio.get_event_loop()
+    web.run_app(app, host='0.0.0.0', port=node._port,
+                print=lambda *a: node.get_logger().info(
+                    f'Web 服务器启动: http://0.0.0.0:{node._port}'))
+
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

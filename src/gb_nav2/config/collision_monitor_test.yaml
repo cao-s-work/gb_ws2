@@ -1,0 +1,46 @@
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: "base_link"
+    odom_frame_id: "odom_lio"
+    cmd_vel_in_topic: "/cmd_vel_nav_test"
+    cmd_vel_out_topic: "/cmd_vel_collision"
+    transform_tolerance: 1.0
+    source_timeout: 3.0
+    base_shift_correction: false
+    stop_pub_timeout: 0.5
+
+    # ===== Polygon 区域定义 =====
+    # 坐标系：base_link 前方为 x 正方向
+    # stop 区（紧停）：x 0.45~0.85m, y ±0.35m
+    # slow 区（降速）：x 0.45~1.40m, y ±0.45m
+    polygons: ["PolygonStop", "PolygonSlow"]
+
+    PolygonStop:
+      type: "polygon"
+      points: [0.85, 0.35, 0.85, -0.35, 0.45, -0.35, 0.45, 0.35]
+      action_type: "stop"
+      max_points: 3
+      visualize: true
+      polygon_pub_topic: "/polygon_stop"
+      enabled: true
+
+    PolygonSlow:
+      type: "polygon"
+      points: [1.40, 0.45, 1.40, -0.45, 0.45, -0.45, 0.45, 0.45]
+      action_type: "slowdown"
+      max_points: 3
+      slowdown_ratio: 0.3
+      visualize: true
+      polygon_pub_topic: "/polygon_slowdown"
+      enabled: true
+
+    # ===== 观察源 =====
+    observation_sources: ["pointcloud"]
+
+    pointcloud:
+      type: "pointcloud"
+      topic: "/points_nav_test"
+      min_height: 0.05
+      max_height: 1.20
+      enabled: true

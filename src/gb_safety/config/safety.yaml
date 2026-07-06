@@ -1,0 +1,66 @@
+# ============================================================
+# gb_safety 安全闸门参数 — 钢镚机器人 (ZSL-1W + MID-360)
+# Phase 8.1: 软件安全保护层
+# ============================================================
+safety_node:
+  ros__parameters:
+    # 输入/输出 Topic
+    input_cmd_topic: "/cmd_vel_nav"
+    output_cmd_topic: "/cmd_vel_safety"
+    estop_topic: "/emergency_stop"
+    odom_topic: "/Odometry"
+    points_topic: "/points_nav"
+    battery_topic: "/battery_state"
+    safety_state_topic: "/safety_state"
+
+    # 控制周期
+    publish_rate: 20.0
+
+    # 速度限幅 (m/s, rad/s) — Phase 5 门禁验收
+    # Phase 7 落地连续遥控调整: vx/vy/wz 统一 0.25
+    max_linear_x: 0.25
+    min_linear_x: -0.08
+    max_angular_z: 0.25
+
+    # ============================================================
+    # ZSL-1W MCU 速度死区 (阶段 7 落地实测结论，硬件特性)
+    # ⚠️ 三轴死区不同，不可统一处理！
+    # - vx 前进/后退最小有效速度: ~0.05 m/s
+    # - vy 横向平移最小有效速度: ~0.12–0.15 m/s (是 vx 的 2.4–3x)
+    # - wz 角速度最小有效速度: ~0.10 rad/s
+    # Phase 7 实测: vy=0.08 完全落在死区内，狗不产生有效横移
+    # 横向平移建议输出 vy >= 0.15 m/s
+    # 详见 real_base_adapter, safety_node, gb_web_node 中各轴独立死区配置
+    # ============================================================
+
+    # 加速度限幅 (m/s^2, rad/s^2) — Phase 5 低加速度
+    max_linear_accel: 0.10
+    max_angular_accel: 0.30
+
+    # 超时检测 (秒)
+    cmd_timeout_sec: 1.00
+    odom_timeout_sec: 0.70
+    points_timeout_sec: 1.00
+    battery_timeout_sec: 5.00
+
+    # Watchdog 开关 — 集成导航模式默认全部打开
+    require_odom: true
+    require_points: true
+    require_battery: false
+
+    # 启动等待时间（秒）— startup_grace 内传感器未就绪时输出 0 并显示 WAITING 状态
+    startup_grace_sec: 10.0
+
+    # 电池阈值
+    battery_low_threshold: 0.20
+
+    # 急停 latch 模式
+    estop_latched: true
+
+    # Disable 时输出零速度
+    zero_on_disable: true
+
+    # 是否同时发布 /cmd_vel_base — Phase 2: 真实底盘
+    publish_base_cmd: true
+    base_cmd_topic: "/cmd_vel_base"
+    allow_real_base: true

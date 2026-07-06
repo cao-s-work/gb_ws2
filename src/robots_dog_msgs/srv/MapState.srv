@@ -1,0 +1,11 @@
+# mapping type: 0->mapping; 1->arc_mapping
+uint8 mapping_type
+# arc_mapping: arc_id
+uint8 arc_id
+# map path prefix
+string map_path_prefix
+# command
+uint8 data
+---
+bool success
+string message

@@ -1,0 +1,11 @@
+#Determine if the current path is still valid
+
+robots_dog_msgs/Trajectory path
+string function_id
+bool use_global_costmap
+bool use_local_costmap
+bool track_unknown_space
+---
+bool is_valid
+int32[] invalid_pose_indices
+float64[] dtc_values
