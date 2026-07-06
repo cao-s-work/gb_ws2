@@ -30,7 +30,7 @@ collision_monitor:
       slowdown_ratio: 0.7
       visualize: true
       polygon_pub_topic: "/polygon_slowdown"
-      enabled: true
+      enabled: false
 
     # ===== 观察源：实际 /points_nav =====
     observation_sources: ["pointcloud"]

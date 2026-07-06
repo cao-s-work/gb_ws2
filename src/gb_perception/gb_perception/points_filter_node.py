@@ -268,13 +268,14 @@ class PointsFilterNode(Node):
     def _transform_points(self, points: np.ndarray,
                           src_frame: str, dst_frame: str,
                           stamp: rclpy.time.Time) -> np.ndarray:
-        """Transform points from src_frame to dst_frame using TF."""
+        """Transform points from src_frame to dst_frame using TF.
+        Returns None on failure — caller MUST drop the frame."""
         if not TF2_AVAILABLE or self.tf_buffer is None:
             self.get_logger().warn(
                 f'TW: Cannot transform {src_frame} -> {dst_frame}, '
                 f'TF2 not available.',
                 throttle_duration_sec=30.0)
-            return points
+            return None
 
         try:
             t = self.tf_buffer.lookup_transform(
@@ -312,10 +313,15 @@ class PointsFilterNode(Node):
             self.get_logger().warn(
                 f'TF transform {src_frame}->{dst_frame} failed: {e}',
                 throttle_duration_sec=10.0)
-            return points
+            return None
 
     def cloud_callback(self, msg: PointCloud2):
-        """Process incoming point cloud."""
+        """Process incoming point cloud.
+        
+        CRITICAL ORDER: NaN → TF → z/range/self/voxel → publish
+        All filtering MUST happen in base_link frame, not tilted livox_imu_link.
+        TF failure: drop the entire frame (do not publish wrong-frame points).
+        """
         self.frame_count += 1
 
         # Convert to numpy
@@ -328,31 +334,34 @@ class PointsFilterNode(Node):
 
         src_frame = msg.header.fix_frame_id() if hasattr(msg.header, 'fix_frame_id') else msg.header.frame_id
 
-        # Step 1: Remove NaN / Inf
+        # Step 1: Remove NaN / Inf (frame-independent, safe to do first)
         if self.remove_nan:
             mask = np.isfinite(points).all(axis=1)
             points = points[mask]
 
-        # Step 2: Height crop
+        # Step 2: TF transform to target_frame FIRST (before any spatial filtering)
+        if src_frame != self.target_frame:
+            ros_stamp = rclpy.time.Time.from_msg(msg.header.stamp)
+            points = self._transform_points(points, src_frame, self.target_frame, ros_stamp)
+            if points is None:
+                # TF failed — drop frame, do NOT publish
+                return
+
+        # Step 3: Height crop (now in base_link — horizontal frame)
         mask_z = (points[:, 2] >= self.z_min) & (points[:, 2] <= self.z_max)
         points = points[mask_z]
 
-        # Step 3: Radial range crop (from origin in the current frame)
+        # Step 4: Radial range crop (from origin in base_link)
         dist = np.linalg.norm(points, axis=1)
         mask_r = (dist >= self.range_min) & (dist <= self.range_max)
         points = points[mask_r]
 
-        # Step 4: Self-body crop (if in body frame)
+        # Step 5: Self-body crop (now in base_link — self-box matches robot body)
         if self.crop_self:
             points = self._crop_self_body(points)
 
-        # Step 5: Voxel downsampling
+        # Step 6: Voxel downsampling
         points = self._voxel_filter(points)
-
-        # Step 6: TF transform to target_frame
-        if src_frame != self.target_frame:
-            ros_stamp = rclpy.time.Time.from_msg(msg.header.stamp)
-            points = self._transform_points(points, src_frame, self.target_frame, ros_stamp)
 
         n_out = len(points)
         self.total_points_out += n_out
