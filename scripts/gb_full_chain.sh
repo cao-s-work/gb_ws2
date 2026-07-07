@@ -308,6 +308,7 @@ ros2 run gb_safety safety_node \
     -p publish_base_cmd:=true \
     -p allow_real_base:=true \
     -p use_mock_base:=false \
+    -p estop_latched:=false \
     -p cmd_timeout_sec:=5.0 \
     > "$LOG_DIR/safety_${TIMESTAMP}.log" 2>&1 &
 SAFETY_PID=$!
@@ -331,35 +332,10 @@ sleep 2
 ros2 topic list 2>/dev/null | grep -q "/cmd_vel_web" && log "✅ /cmd_vel_web 就绪" || log "⚠️ /cmd_vel_web 未就绪"
 
 # ============================================================
-# 10. 狗端 SDK 清理 (清除残留 session，避免 connect time out)
+# 10. 底盘适配器 (连接狗 SDK)
 # ============================================================
 log ""
-log "━━━ 第10步: 狗端 SDK 清理 ━━━"
-
-# 狗端 SSH 凭据 (按需修改)
-DOG_IP="${DOG_IP:-192.168.168.168}"
-DOG_USER="${DOG_USER:-firefly}"
-DOG_PASS="${DOG_PASS:-}"
-
-if [ -n "$DOG_PASS" ]; then
-    # 停止看门狗 → 杀残留进程 → 重启看门狗
-    log "  停止 gosdk-watchdog → 清残留 → 重启..."
-    sshpass -p "$DOG_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-        "${DOG_USER}@${DOG_IP}" \
-        "sudo systemctl stop gosdk-watchdog; sudo kill -9 \$(pgrep -f gosdk_watchdog) \$(pgrep mc_ctrl) 2>/dev/null; sleep 1; sudo systemctl start gosdk-watchdog" \
-        > /dev/null 2>&1
-    sleep 3
-    log "  ✅ 狗端 SDK 已重置"
-else
-    log "  ⚠️ DOG_PASS 未设置，跳过狗端 SDK 清理"
-    log "     如 adapter 连不上狗，请在狗端手动执行: sudo pkill -f mc_ctrl"
-fi
-
-# ============================================================
-# 11. 底盘适配器 (连接狗 SDK)
-# ============================================================
-log ""
-log "━━━ 第11步: 底盘适配器 ━━━"
+log "━━━ 第10步: 底盘适配器 ━━━"
 ros2 launch gb_base_driver real_adapter.launch.py \
     read_only:=false \
     max_linear_speed:=0.60 \
@@ -367,6 +343,45 @@ ros2 launch gb_base_driver real_adapter.launch.py \
     > "$LOG_DIR/adapter_${TIMESTAMP}.log" 2>&1 &
 ADAPTER_PID=$!
 log "  PID=$ADAPTER_PID"
+
+# ============================================================
+# 11. SDK 连接健康检查 (不阻塞主流程)
+# ============================================================
+log ""
+log "━━━ 第11步: SDK 连接检查 ━━━"
+
+check_sdk_connected() {
+    timeout 5 ros2 topic echo /robot_state --once 2>/dev/null | grep -q '"sdk_connected": true'
+}
+
+sleep 8
+if check_sdk_connected; then
+    log "  ✅ SDK 已连接，无需修复"
+else
+    log "  ⚠️ SDK 未连接，后台触发狗端 repair..."
+    (
+        DOG_IP="${DOG_IP:-192.168.168.168}"
+        DOG_USER="${DOG_USER:-firefly}"
+        DOG_PASS="${DOG_PASS:-}"
+        if [ -n "$DOG_PASS" ]; then
+            timeout 15 sshpass -p "$DOG_PASS" ssh \
+                -o ConnectTimeout=3 \
+                -o ServerAliveInterval=2 \
+                -o ServerAliveCountMax=2 \
+                -o StrictHostKeyChecking=no \
+                "${DOG_USER}@${DOG_IP}" \
+                "sudo -n systemctl stop gosdk-watchdog 2>/dev/null || true;
+                 sudo -n pkill -f gosdk 2>/dev/null || true;
+                 sudo -n pkill -f mc_ctrl 2>/dev/null || true;
+                 sudo -n systemctl start --no-block gosdk-watchdog 2>/dev/null || true" \
+                >> "$LOG_DIR/dog_sdk_repair_${TIMESTAMP}.log" 2>&1 \
+                || echo "[$(date)] repair timeout/failed, main chain continues" >> "$LOG_DIR/dog_sdk_repair_${TIMESTAMP}.log"
+        else
+            echo "[$(date)] DOG_PASS not set, skip repair" >> "$LOG_DIR/dog_sdk_repair_${TIMESTAMP}.log"
+        fi
+    ) &
+    log "  🔧 dog sdk repair 后台执行中 (日志: dog_sdk_repair_${TIMESTAMP}.log)"
+fi
 
 sleep 3
 log ""
