@@ -11,7 +11,7 @@ collision_monitor:
     stop_pub_timeout: 0.5
 
     # ===== Polygon 区域定义 =====
-    polygons: ["PolygonStop", "PolygonSlow"]
+    polygons: ["PolygonStop"]
 
     PolygonStop:
       type: "polygon"

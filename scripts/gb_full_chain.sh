@@ -203,14 +203,14 @@ ros2 run pointcloud_to_laserscan pointcloud_to_laserscan_node \
     -r scan:=/scan \
     -p target_frame:=base_link \
     -p transform_tolerance:=0.1 \
-    -p min_height:=-0.5 \
-    -p max_height:=0.5 \
+    -p min_height:=0.05 \
+    -p max_height:=0.60 \
     -p angle_min:=-3.14159 \
     -p angle_max:=3.14159 \
     -p angle_increment:=0.0087 \
     -p scan_time:=0.1 \
-    -p range_min:=0.3 \
-    -p range_max:=10.0 \
+    -p range_min:=0.35 \
+    -p range_max:=8.0 \
     -p use_inf:=true \
     -p inf_epsilon:=1.0 \
     -p concurrency_level:=1 \
@@ -244,19 +244,24 @@ log "  activate AMCL..."
 timeout 5 ros2 lifecycle set /amcl activate 2>/dev/null && sleep 1 || log "  ⚠️ activate 超时或失败"
 
 # 自动设置初始位姿 (set_initial_pose=false 时需要)
-DEFAULT_X="${GB_INIT_X:-0.49}"
-DEFAULT_Y="${GB_INIT_Y:-0.72}"
-YAW_RAD="${GB_INIT_YAW:--0.314}"
-log "  设置 AMCL 初始位姿: x=${DEFAULT_X}, y=${DEFAULT_Y}, yaw_rad=${YAW_RAD}"
-for i in 1 2 3; do
-    ros2 topic pub -1 /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
-    "{header: {stamp: {sec:0, nanosec:0}, frame_id: map}, \
-      pose: {pose: {position: {x: ${DEFAULT_X}, y: ${DEFAULT_Y}, z: 0.0}, \
-             orientation: {x: 0.0, y: 0.0, z: -0.1564, w: 0.9877}}, \
-             covariance: [0.25,0,0,0,0,0, 0,0.25,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0.068]}}" \
-    2>/dev/null && sleep 0.3
-done
-log "  ✅ 已发布 /initialpose x3"
+# 仅当 GB_AUTO_INITIALPOSE=1 时才自动发布 /initialpose
+if [ "${GB_AUTO_INITIALPOSE:-0}" = "1" ]; then
+    DEFAULT_X="${GB_INIT_X:-0.49}"
+    DEFAULT_Y="${GB_INIT_Y:-0.72}"
+    YAW_RAD="${GB_INIT_YAW:--0.314}"
+    log "  设置 AMCL 初始位姿: x=${DEFAULT_X}, y=${DEFAULT_Y}, yaw_rad=${YAW_RAD}"
+    for i in 1 2 3; do
+        ros2 topic pub -1 /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
+        "{header: {stamp: {sec:0, nanosec:0}, frame_id: map}, \
+          pose: {pose: {position: {x: ${DEFAULT_X}, y: ${DEFAULT_Y}, z: 0.0}, \
+                 orientation: {x: 0.0, y: 0.0, z: -0.1564, w: 0.9877}}, \
+                 covariance: [0.25,0,0,0,0,0, 0,0.25,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0.068]}}" \
+        2>/dev/null && sleep 0.3
+    done
+    log "  ✅ 已发布 /initialpose x3"
+else
+    log "  跳过自动 initialpose，请使用 Web/RViz 重定位"
+fi
 
 wait_for_tf "map" "camera_init" 30 || {
     log "⚠️ TF map→camera_init 未就绪，AMCL 可能还在初始化"

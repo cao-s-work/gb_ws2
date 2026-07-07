@@ -102,7 +102,7 @@ class LioOdom2DProjector(Node):
 
         # Build 2D odom message
         out = Odometry()
-        out.header.stamp = msg.header.stamp
+        out.header.stamp = self.get_clock().now().to_msg()
         out.header.frame_id = self.odom_frame
         out.child_frame_id = self.base_frame
 
