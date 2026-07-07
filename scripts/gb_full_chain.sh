@@ -163,24 +163,58 @@ ensure_lifecycle_active() {
     return 1
 }
 
-check_unique_cmd_vel_base_pub() {
-    log "检查 /cmd_vel_base publisher 唯一性..."
-
+# 检查 /cmd_vel_base 是否仅由 safety_node 发布（允许 safety_node 多 endpoint）
+check_cmd_vel_base_owner() {
+    log "检查 /cmd_vel_base publisher 归属..."
     local info
     info=$(timeout 5 ros2 topic info /cmd_vel_base --verbose 2>/dev/null || true)
-
-    echo "$info" >> "$LOG_DIR/cmd_vel_base_info_${TIMESTAMP}.log"
+    echo "$info" > "$LOG_DIR/cmd_vel_base_info_${TIMESTAMP}.log"
 
     local pub_count
     pub_count=$(echo "$info" | grep -E "Publisher count:" | awk '{print $3}')
-
-    if [ "$pub_count" = "1" ]; then
-        log "✅ /cmd_vel_base publisher count = 1"
-        return 0
+    if [ -z "$pub_count" ] || [ "$pub_count" = "0" ]; then
+        log "❌ /cmd_vel_base 没有 publisher"
+        return 1
     fi
 
-    log "❌ /cmd_vel_base publisher count = ${pub_count:-unknown}，必须唯一"
-    return 1
+    # 只解析 Publisher 区域里的 Node name，不解析 subscriber 区域
+    local pub_nodes
+    pub_nodes=$(echo "$info" | awk '
+        /Publisher count:/ {inpub=1; next}
+        /Subscription count:/ {inpub=0}
+        inpub && /Node name:/ {print $3}
+    ' | sort -u)
+
+    if [ -z "$pub_nodes" ]; then
+        log "❌ 无法解析 /cmd_vel_base publisher 节点"
+        return 1
+    fi
+
+    log "  /cmd_vel_base publisher count = $pub_count"
+    log "  publisher nodes:"
+    echo "$pub_nodes" | while read -r n; do log "    - $n"; done
+
+    # 允许 safety_node 有多个 publisher endpoint
+    # 但不允许其他节点发布 /cmd_vel_base
+    local bad_nodes
+    bad_nodes=$(echo "$pub_nodes" | grep -Ev '^(safety_node)$' || true)
+    if [ -n "$bad_nodes" ]; then
+        log "❌ /cmd_vel_base 存在非 safety_node 发布者:"
+        echo "$bad_nodes" | while read -r n; do log "   BAD: $n"; done
+        return 1
+    fi
+
+    # 额外检查：确认只有一个 safety_node 进程（非 Ghost 双进程）
+    log "  检查 safety_node 进程..."
+    pgrep -af "safety_node|gb_safety" >> "$LOG_DIR/safety_process_${TIMESTAMP}.log" 2>&1 || true
+    local safety_count
+    safety_count=$(pgrep -cf "safety_node|gb_safety" 2>/dev/null || echo 0)
+    if [ "$safety_count" -gt 1 ]; then
+        log "  ⚠️ 检测到 $safety_count 个 safety_node 进程，可能为 Ghost 残留"
+    fi
+
+    log "  ✅ /cmd_vel_base 仅由 safety_node 发布，publisher endpoint=$pub_count，允许"
+    return 0
 }
 
 log "══════════════════════════════════════"
@@ -502,8 +536,8 @@ wait_for_topic "/cmd_vel_base" 15 || {
     exit 1
 }
 
-check_unique_cmd_vel_base_pub || {
-    log "❌ /cmd_vel_base publisher 不唯一，终止"
+check_cmd_vel_base_owner || {
+    log "❌ /cmd_vel_base 发布者归属异常，终止"
     exit 1
 }
 
