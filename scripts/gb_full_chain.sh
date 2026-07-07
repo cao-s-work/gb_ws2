@@ -76,6 +76,33 @@ wait_for_tf() {
     return 1
 }
 
+# 强制确认 Nav2 lifecycle 全部 active（lifecycle_manager 不可靠时的兜底）
+ensure_lifecycle_active() {
+    local node=$1
+    local state=""
+    log "  检查 lifecycle: $node"
+    for i in $(seq 1 20); do
+        state=$(timeout 3 ros2 lifecycle get "$node" 2>/dev/null || echo "TIMEOUT")
+        if echo "$state" | grep -q "active"; then
+            log "  ✅ $node active"
+            return 0
+        fi
+        if echo "$state" | grep -q "unconfigured"; then
+            log "  $node unconfigured → configure"
+            timeout 5 ros2 lifecycle set "$node" configure 2>/dev/null || true
+            sleep 1
+        elif echo "$state" | grep -q "inactive"; then
+            log "  $node inactive → activate"
+            timeout 5 ros2 lifecycle set "$node" activate 2>/dev/null || true
+            sleep 1
+        else
+            sleep 1
+        fi
+    done
+    log "  ❌ $node 未能进入 active"
+    return 1
+}
+
 log "══════════════════════════════════════"
 log "GB钢镚 全链路自启动"
 log "══════════════════════════════════════"
@@ -187,6 +214,12 @@ wait_for_topic "/map" 30 || {
     log "❌ /map 未就绪，终止"
     exit 1
 }
+
+# 强制确认 Nav2 全部 active（lifecycle_manager 时常失败）
+log "确认 Nav2 lifecycle 全部 active..."
+for n in /map_server /planner_server /controller_server /smoother_server /behavior_server /bt_navigator /velocity_smoother; do
+    ensure_lifecycle_active "$n" || log "⚠️ $n 激活失败，继续..."
+done
 
 # ============================================================
 # 6. 定位: pointcloud_to_laserscan + AMCL
