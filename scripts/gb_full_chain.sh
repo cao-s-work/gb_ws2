@@ -250,7 +250,7 @@ ros2 launch gb_bringup nav2_minimal.launch.py \
     params_file:="$NAV2_PARAMS" \
     use_sim_time:=false \
     autostart:=true \
-    use_lifecycle_manager:=true \
+    use_lifecycle_manager:=false \
     > "$LOG_DIR/nav2_${TIMESTAMP}.log" 2>&1 &
 NAV2_PID=$!
 log "  PID=$NAV2_PID"
@@ -259,6 +259,19 @@ wait_for_topic "/map" 30 || {
     log "❌ /map 未就绪，终止"
     exit 1
 }
+
+# 手动 lifecycle 激活所有 Nav2 节点（无 lifecycle_manager）
+log "  手动激活 Nav2 节点..."
+NAV2_LIFECYCLE_NODES=("map_server" "controller_server" "smoother_server" "planner_server" "behavior_server" "bt_navigator" "velocity_smoother")
+for node in "${NAV2_LIFECYCLE_NODES[@]}"; do
+    log "    configuring /$node..."
+    timeout 15 ros2 lifecycle set "/$node" configure 2>/dev/null || log "    ⚠️ /$node configure 超时"
+    sleep 0.5
+    log "    activating /$node..."
+    timeout 15 ros2 lifecycle set "/$node" activate 2>/dev/null || log "    ⚠️ /$node activate 超时"
+    sleep 0.5
+done
+log "  ✅ Nav2 节点 lifecycle 激活完成"
 
 # ============================================================
 # 6. 定位: pointcloud_to_laserscan + AMCL
@@ -314,26 +327,6 @@ log "  configure AMCL..."
 timeout 20 ros2 lifecycle set /amcl configure 2>/dev/null && sleep 1 || log "  ⚠️ configure 超时或失败"
 log "  activate AMCL..."
 timeout 20 ros2 lifecycle set /amcl activate 2>/dev/null && sleep 1 || log "  ⚠️ activate 超时或失败"
-
-# TRANSIENT_LOCAL 兜底：如果 AMCL 没收到 /map，强制 map_server 重激活
-log "  确认 AMCL 已收到 /map..."
-for i in $(seq 1 8); do
-    MAP_PUB=$(timeout 2 ros2 topic info /map 2>/dev/null | grep "Publisher count:" | awk '{print $3}')
-    if [ "$MAP_PUB" != "0" ] && [ -n "$MAP_PUB" ]; then
-        log "  ✅ /map 有发布者 (count=$MAP_PUB)"
-        break
-    fi
-    if [ "$i" -eq 4 ]; then
-        log "  ⚡ TRANSIENT_LOCAL 未送达，强制 map_server deactivate→configure→activate..."
-        timeout 5 ros2 lifecycle set /map_server deactivate 2>/dev/null || true
-        sleep 2
-        timeout 15 ros2 lifecycle set /map_server configure 2>/dev/null || true
-        sleep 1
-        timeout 15 ros2 lifecycle set /map_server activate 2>/dev/null || true
-        sleep 2
-    fi
-    sleep 2
-done
 
 # 自动设置初始位姿（必须用 Python/rclpy + now()，ros2 topic pub -1 的 stamp=0 会被 AMCL 丢弃）
 DEFAULT_X="${GB_INIT_X:-0.49}"
