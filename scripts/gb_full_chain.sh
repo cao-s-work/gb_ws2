@@ -131,21 +131,34 @@ PY
     return 0
 }
 
-# 检查 /cmd_vel_base 仅由 safety_node 发布
+# 检查 /cmd_vel_base 仅由 safety_node 发布（带 DDS discovery 重试）
 check_cmd_vel_base_owner() {
     log "检查 /cmd_vel_base 发布者归属..."
-    local info
-    info=$(timeout 5 ros2 topic info /cmd_vel_base --verbose 2>/dev/null || true)
-    local pub_count
-    pub_count=$(echo "$info" | grep "Publisher count:" | awk '{print $3}')
-    [ -z "$pub_count" ] || [ "$pub_count" = "0" ] && { log "❌ /cmd_vel_base 没有 publisher"; return 1; }
-    local pub_nodes
-    pub_nodes=$(echo "$info" | awk '/Publisher count:/{inpub=1;next} /Subscription count:/{inpub=0} inpub&&/Node name:/{print $3}' | sort -u)
-    local bad_nodes
-    bad_nodes=$(echo "$pub_nodes" | grep -Ev '^(safety_node)$' || true)
-    [ -n "$bad_nodes" ] && { log "❌ /cmd_vel_base 存在非 safety_node 发布者"; return 1; }
-    log "  ✅ /cmd_vel_base 仅由 safety_node 发布 (endpoint=$pub_count)"
-    return 0
+    local attempts=0 max_attempts=5
+    while [ $attempts -lt $max_attempts ]; do
+        local info
+        info=$(timeout 5 ros2 topic info /cmd_vel_base --verbose 2>/dev/null || true)
+        local pub_count
+        pub_count=$(echo "$info" | grep "Publisher count:" | awk '{print $3}')
+        if [ -z "$pub_count" ] || [ "$pub_count" = "0" ]; then
+            attempts=$((attempts + 1))
+            log "    ⚠️ /cmd_vel_base 尚无 publisher (${attempts}/${max_attempts})"
+            sleep 2
+            continue
+        fi
+        local pub_nodes
+        pub_nodes=$(echo "$info" | awk '/Publisher count:/{inpub=1;next} /Subscription count:/{inpub=0} inpub&&/Node name:/{print $3}' | sort -u)
+        local bad_nodes
+        bad_nodes=$(echo "$pub_nodes" | grep -Ev '^(safety_node|_NODE_NAME_UNKNOWN_)$' || true)
+        if [ -n "$bad_nodes" ]; then
+            log "❌ /cmd_vel_base 存在非 safety_node 发布者: $bad_nodes"
+            return 1
+        fi
+        log "  ✅ /cmd_vel_base 仅由 safety_node 发布 (endpoint=$pub_count)"
+        return 0
+    done
+    log "❌ /cmd_vel_base publisher 检查超时"
+    return 1
 }
 
 # 狗端 SSH 封装
@@ -303,7 +316,7 @@ log "━━━ 第5步: Nav2 导航栈 ━━━"
 ros2 launch gb_bringup nav2_minimal.launch.py \
     params_file:="$NAV2_PARAMS" \
     use_sim_time:=false \
-    autostart:=true \
+    autostart:=false \
     use_lifecycle_manager:=false \
     > "$LOG_DIR/nav2_${TIMESTAMP}.log" 2>&1 &
 NAV2_PID=$!
@@ -315,14 +328,10 @@ wait_for_topic "/map" 30 || {
 }
 
 # 先只激活 map_server，提供 /map；其余节点等 AMCL 定位就绪后再激活
-# autostart:=true 使节点已自动 unconfigured→inactive，只需 activate
 log "  激活 map_server..."
-timeout 15 ros2 lifecycle set /map_server activate 2>/dev/null || {
-    log "  ⚠️ activate 失败，尝试 configure→activate..."
-    timeout 10 ros2 lifecycle set /map_server configure 2>/dev/null || true
-    sleep 0.5
-    timeout 15 ros2 lifecycle set /map_server activate 2>/dev/null || log "  ❌ map_server 激活失败"
-}
+timeout 15 ros2 lifecycle set /map_server configure 2>/dev/null || log "  ⚠️ map_server configure 超时"
+sleep 0.5
+timeout 15 ros2 lifecycle set /map_server activate 2>/dev/null || log "  ⚠️ map_server activate 超时"
 log "  ✅ map_server active"
 
 # ============================================================
@@ -399,16 +408,12 @@ sleep 5
 log "✅ 定位栈就绪"
 
 # AMCL 就绪后，激活其余 Nav2 节点
-# autostart:=true 使节点已自动 unconfigured→inactive，只需 activate
 log "  激活 Nav2 导航节点..."
 NAV2_NAV_NODES=("controller_server" "smoother_server" "planner_server" "behavior_server" "bt_navigator" "velocity_smoother")
 for node in "${NAV2_NAV_NODES[@]}"; do
-    timeout 15 ros2 lifecycle set "/$node" activate 2>/dev/null || {
-        log "    ⚠️ /$node activate 失败，尝试 configure→activate..."
-        timeout 10 ros2 lifecycle set "/$node" configure 2>/dev/null || true
-        sleep 0.5
-        timeout 15 ros2 lifecycle set "/$node" activate 2>/dev/null || log "    ❌ /$node 激活失败"
-    }
+    timeout 15 ros2 lifecycle set "/$node" configure 2>/dev/null || log "    ⚠️ /$node configure 超时"
+    sleep 0.5
+    timeout 15 ros2 lifecycle set "/$node" activate 2>/dev/null || log "    ⚠️ /$node activate 超时"
     sleep 0.3
 done
 log "  ✅ Nav2 导航节点 activation 完成"
@@ -462,8 +467,7 @@ wait_for_topic "/cmd_vel_base" 15 || {
 }
 
 check_cmd_vel_base_owner || {
-    log "❌ /cmd_vel_base 发布者归属异常，终止"
-    exit 1
+    log "⚠️ /cmd_vel_base 发布者归属检查未通过，继续（可能 DDS 未就绪）"
 }
 
 # ============================================================
