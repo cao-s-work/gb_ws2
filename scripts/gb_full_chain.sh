@@ -13,7 +13,7 @@
 #   7. 碰撞监控                    → /cmd_vel_collision
 #   8. 安全闸门                    → /cmd_vel_base
 #   9. Web 遥控
-#  10. 底盘适配器                  → SDK → 狗
+#  10. 狗端 SDK + adapter          → 先启动狗端 → 再连 SDK → 等 connected → (可选)standUp
 # ============================================================
 set -e
 
@@ -145,6 +145,59 @@ check_cmd_vel_base_owner() {
     [ -n "$bad_nodes" ] && { log "❌ /cmd_vel_base 存在非 safety_node 发布者"; return 1; }
     log "  ✅ /cmd_vel_base 仅由 safety_node 发布 (endpoint=$pub_count)"
     return 0
+}
+
+# 狗端 SSH 封装
+dog_ssh() {
+    local cmd="$1"
+    local dog_ip="${DOG_IP:-192.168.168.168}"
+    local dog_user="${DOG_USER:-firefly}"
+    local dog_pass="${DOG_PASS:-}"
+    if [ -n "$dog_pass" ]; then
+        timeout 12 sshpass -p "$dog_pass" ssh \
+            -o ConnectTimeout=3 \
+            -o ServerAliveInterval=2 \
+            -o ServerAliveCountMax=2 \
+            -o StrictHostKeyChecking=no \
+            "${dog_user}@${dog_ip}" "$cmd"
+    else
+        timeout 12 ssh \
+            -o ConnectTimeout=3 \
+            -o ServerAliveInterval=2 \
+            -o ServerAliveCountMax=2 \
+            -o StrictHostKeyChecking=no \
+            "${dog_user}@${dog_ip}" "$cmd"
+    fi
+}
+
+# 启动/确认狗端 SDK watchdog
+ensure_dog_sdk_daemon() {
+    log "启动/确认狗端 SDK watchdog..."
+    dog_ssh "
+        sudo -n systemctl start --no-block gosdk-watchdog 2>/dev/null || true
+        sleep 2
+        pgrep -af 'mc_ctrl r|gosdk' || true
+    " >> "$LOG_DIR/dog_sdk_start_${TIMESTAMP}.log" 2>&1 || {
+        log "⚠️ 狗端 SDK watchdog 启动检查失败，继续让 adapter 自动重连"
+        return 1
+    }
+    log "✅ 狗端 SDK watchdog 已触发"
+    return 0
+}
+
+# 等待 /robot_state 中 sdk_connected=true
+wait_for_sdk_connected() {
+    local timeout_sec=${1:-45}
+    log "等待 SDK connected=true ..."
+    for i in $(seq 1 "$timeout_sec"); do
+        if timeout 3 ros2 topic echo /robot_state --once 2>/dev/null | grep -q '"sdk_connected": true'; then
+            log "✅ SDK connected=true (${i}s)"
+            return 0
+        fi
+        sleep 1
+    done
+    log "❌ SDK connected=true 超时 (${timeout_sec}s)"
+    return 1
 }
 
 log "══════════════════════════════════════"
@@ -410,58 +463,43 @@ sleep 2
 ros2 topic list 2>/dev/null | grep -q "/cmd_vel_web" && log "✅ /cmd_vel_web 就绪" || log "⚠️ /cmd_vel_web 未就绪"
 
 # ============================================================
-# 10. 底盘适配器 (连接狗 SDK)
+# 10. 底盘 SDK + adapter
 # ============================================================
 log ""
-log "━━━ 第10步: 底盘适配器 ━━━"
+log "━━━ 第10步: 底盘 SDK + adapter ━━━"
+ensure_dog_sdk_daemon || true
 ros2 launch gb_base_driver real_adapter.launch.py \
     read_only:=false \
-    max_linear_speed:=0.60 \
-    max_angular_speed:=0.80 \
+    sdk_local_ip:="${SDK_LOCAL_IP:-192.168.168.216}" \
+    sdk_dog_ip:="${SDK_DOG_IP:-192.168.168.168}" \
+    max_linear_speed:=0.35 \
+    max_angular_speed:=0.35 \
+    publish_rate:=10.0 \
     > "$LOG_DIR/adapter_${TIMESTAMP}.log" 2>&1 &
 ADAPTER_PID=$!
-log "  PID=$ADAPTER_PID"
-
-# ============================================================
-# 11. SDK 连接健康检查 (不阻塞主流程)
-# ============================================================
-log ""
-log "━━━ 第11步: SDK 连接检查 ━━━"
-
-check_sdk_connected() {
-    timeout 5 ros2 topic echo /robot_state --once 2>/dev/null | grep -q '"sdk_connected": true'
+log "  Adapter PID=$ADAPTER_PID"
+wait_for_topic "/robot_state" 20 || {
+    log "⚠️ /robot_state 未就绪，adapter 可能未启动成功"
 }
-
-sleep 8
-if check_sdk_connected; then
-    log "  ✅ SDK 已连接，无需修复"
+if ! wait_for_sdk_connected 45; then
+    log "⚠️ SDK 未连接，触发一次狗端 repair 后继续等待"
+    dog_ssh "
+        sudo -n systemctl restart gosdk-watchdog 2>/dev/null || true
+        sleep 3
+        pgrep -af 'mc_ctrl r|gosdk' || true
+    " >> "$LOG_DIR/dog_sdk_repair_${TIMESTAMP}.log" 2>&1 || true
+    wait_for_sdk_connected 30 || {
+        log "❌ SDK 仍未连接，保留 Web/导航显示，但不要实机运动"
+    }
+fi
+if [ "${GB_AUTO_STANDUP:-0}" = "1" ]; then
+    log "自动 standUp..."
+    timeout 15 ros2 service call /gb_base/stand_up std_srvs/srv/Trigger "{}" \
+        >> "$LOG_DIR/standup_${TIMESTAMP}.log" 2>&1 || log "⚠️ standUp 调用失败"
 else
-    log "  ⚠️ SDK 未连接，后台触发狗端 repair..."
-    (
-        DOG_IP="${DOG_IP:-192.168.168.168}"
-        DOG_USER="${DOG_USER:-firefly}"
-        DOG_PASS="${DOG_PASS:-}"
-        if [ -n "$DOG_PASS" ]; then
-            timeout 15 sshpass -p "$DOG_PASS" ssh \
-                -o ConnectTimeout=3 \
-                -o ServerAliveInterval=2 \
-                -o ServerAliveCountMax=2 \
-                -o StrictHostKeyChecking=no \
-                "${DOG_USER}@${DOG_IP}" \
-                "sudo -n systemctl stop gosdk-watchdog 2>/dev/null || true;
-                 sudo -n pkill -f gosdk 2>/dev/null || true;
-                 sudo -n pkill -f mc_ctrl 2>/dev/null || true;
-                 sudo -n systemctl start --no-block gosdk-watchdog 2>/dev/null || true" \
-                >> "$LOG_DIR/dog_sdk_repair_${TIMESTAMP}.log" 2>&1 \
-                || echo "[$(date)] repair timeout/failed, main chain continues" >> "$LOG_DIR/dog_sdk_repair_${TIMESTAMP}.log"
-        else
-            echo "[$(date)] DOG_PASS not set, skip repair" >> "$LOG_DIR/dog_sdk_repair_${TIMESTAMP}.log"
-        fi
-    ) &
-    log "  🔧 dog sdk repair 后台执行中 (日志: dog_sdk_repair_${TIMESTAMP}.log)"
+    log "跳过自动 standUp；需要手动执行：ros2 service call /gb_base/stand_up std_srvs/srv/Trigger \"{}\""
 fi
 
-sleep 3
 log ""
 log "══════════════════════════════════════"
 log "✅ 全链路启动完成！"
@@ -479,9 +517,6 @@ log "  Adapter         PID=$ADAPTER_PID"
 log ""
 log "日志目录: $LOG_DIR"
 log "══════════════════════════════════════"
-log ""
-log "💡 提示: 适配器连接 SDK 后需发送 standUp 指令使狗站立"
-log "   ros2 service call /gb_base/stand_up std_srvs/srv/Trigger \"{}\""
 log ""
 log "💡 停止全链路: pkill -f 'gb_full_chain' 或 systemctl stop gb-full-chain"
 
