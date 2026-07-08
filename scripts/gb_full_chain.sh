@@ -67,7 +67,7 @@ wait_for_tf() {
     local from=$1 to=$2 timeout=${3:-30}
     log "等待 TF: $from → $to ..."
     for i in $(seq 1 $timeout); do
-        if ros2 run tf2_ros tf2_echo "$from" "$to" 2>&1 | timeout 2 grep -q "Translation" 2>/dev/null; then
+        if timeout 2 ros2 run tf2_ros tf2_echo "$from" "$to" 2>/dev/null | grep -q "Translation"; then
             log "✅ TF $from→$to 就绪 (${i}s)"
             return 0
         fi
@@ -315,10 +315,14 @@ wait_for_topic "/map" 30 || {
 }
 
 # 先只激活 map_server，提供 /map；其余节点等 AMCL 定位就绪后再激活
+# autostart:=true 使节点已自动 unconfigured→inactive，只需 activate
 log "  激活 map_server..."
-timeout 15 ros2 lifecycle set /map_server configure 2>/dev/null || log "  ⚠️ map_server configure 超时"
-sleep 0.5
-timeout 15 ros2 lifecycle set /map_server activate 2>/dev/null || log "  ⚠️ map_server activate 超时"
+timeout 15 ros2 lifecycle set /map_server activate 2>/dev/null || {
+    log "  ⚠️ activate 失败，尝试 configure→activate..."
+    timeout 10 ros2 lifecycle set /map_server configure 2>/dev/null || true
+    sleep 0.5
+    timeout 15 ros2 lifecycle set /map_server activate 2>/dev/null || log "  ❌ map_server 激活失败"
+}
 log "  ✅ map_server active"
 
 # ============================================================
@@ -372,7 +376,10 @@ for i in $(seq 1 10); do
 done
 sleep 2
 log "  configure AMCL..."
-timeout 20 ros2 lifecycle set /amcl configure 2>/dev/null && sleep 1 || log "  ⚠️ configure 超时或失败"
+timeout 20 ros2 lifecycle set /amcl configure 2>/dev/null && sleep 1 || {
+    log "  ⚠️ configure 失败，尝试直接 activate..."
+    timeout 20 ros2 lifecycle set /amcl activate 2>/dev/null && sleep 1 || log "  ❌ AMCL 激活失败"
+}
 log "  activate AMCL..."
 timeout 20 ros2 lifecycle set /amcl activate 2>/dev/null && sleep 1 || log "  ⚠️ activate 超时或失败"
 
@@ -392,15 +399,17 @@ sleep 5
 log "✅ 定位栈就绪"
 
 # AMCL 就绪后，激活其余 Nav2 节点
+# autostart:=true 使节点已自动 unconfigured→inactive，只需 activate
 log "  激活 Nav2 导航节点..."
 NAV2_NAV_NODES=("controller_server" "smoother_server" "planner_server" "behavior_server" "bt_navigator" "velocity_smoother")
 for node in "${NAV2_NAV_NODES[@]}"; do
-    log "    configuring /$node..."
-    timeout 15 ros2 lifecycle set "/$node" configure 2>/dev/null || log "    ⚠️ /$node configure 超时"
-    sleep 0.5
-    log "    activating /$node..."
-    timeout 15 ros2 lifecycle set "/$node" activate 2>/dev/null || log "    ⚠️ /$node activate 超时"
-    sleep 0.5
+    timeout 15 ros2 lifecycle set "/$node" activate 2>/dev/null || {
+        log "    ⚠️ /$node activate 失败，尝试 configure→activate..."
+        timeout 10 ros2 lifecycle set "/$node" configure 2>/dev/null || true
+        sleep 0.5
+        timeout 15 ros2 lifecycle set "/$node" activate 2>/dev/null || log "    ❌ /$node 激活失败"
+    }
+    sleep 0.3
 done
 log "  ✅ Nav2 导航节点 activation 完成"
 
