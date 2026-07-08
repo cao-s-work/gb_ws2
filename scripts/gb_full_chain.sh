@@ -447,7 +447,7 @@ sleep 1
 ros2 run gb_safety safety_node \
     --ros-args \
     -r __node:=safety_node \
-    -p input_cmd_topic:=/cmd_vel_collision \
+    -p input_cmd_topic:=/cmd_vel_nav \
     -p output_cmd_topic:=/cmd_vel_base \
     -p web_cmd_topic:=/cmd_vel_web \
     -p require_odom:=false \
