@@ -77,6 +77,23 @@ wait_for_tf() {
     return 1
 }
 
+# lifecycle 统一激活函数
+ensure_lifecycle_active() {
+    local node=$1
+    local timeout=${2:-20}
+    log "  激活 $node ..."
+    if ! timeout $timeout ros2 lifecycle set "$node" configure 2>/dev/null; then
+        log "  ⚠️ $node configure 超时，尝试直接 activate"
+    fi
+    sleep 0.5
+    if ! timeout $timeout ros2 lifecycle set "$node" activate 2>/dev/null; then
+        log "  ❌ $node activate 失败"
+        return 1
+    fi
+    log "  ✅ $node active"
+    return 0
+}
+
 # 使用 Python/rclpy 发布 /initialpose，带当前时间戳
 publish_initialpose_now() {
     local x="${1:-0.49}" y="${2:-0.72}" yaw="${3:--0.314}"
@@ -213,6 +230,34 @@ wait_for_sdk_connected() {
     log "❌ SDK connected=true 超时 (${timeout_sec}s)"
     return 1
 }
+
+# 强制清理旧节点（防止残留端口占用、双发布者 Ghost）
+log "清理旧 ROS 节点..."
+pkill -f "nav2_minimal.launch.py" 2>/dev/null || true
+pkill -f "fastlio.launch.py" 2>/dev/null || true
+pkill -f "perception.launch.py" 2>/dev/null || true
+pkill -f "odom_2d.launch.py" 2>/dev/null || true
+pkill -f "collision_monitor.launch.py" 2>/dev/null || true
+pkill -f "gb_web.launch.py" 2>/dev/null || true
+pkill -f "real_adapter.launch.py" 2>/dev/null || true
+pkill -f "map_server" 2>/dev/null || true
+pkill -f "planner_server" 2>/dev/null || true
+pkill -f "controller_server" 2>/dev/null || true
+pkill -f "smoother_server" 2>/dev/null || true
+pkill -f "behavior_server" 2>/dev/null || true
+pkill -f "bt_navigator" 2>/dev/null || true
+pkill -f "velocity_smoother" 2>/dev/null || true
+pkill -f "lifecycle_manager" 2>/dev/null || true
+pkill -f "nav2_amcl" 2>/dev/null || true
+pkill -f "amcl" 2>/dev/null || true
+pkill -f "pointcloud_to_laserscan" 2>/dev/null || true
+pkill -f "collision_monitor" 2>/dev/null || true
+pkill -f "safety_node" 2>/dev/null || true
+pkill -f "static_transform_publisher" 2>/dev/null || true
+sleep 3
+ros2 daemon stop 2>/dev/null || true
+ros2 daemon start 2>/dev/null || true
+sleep 1
 
 log "══════════════════════════════════════"
 log "GB钢镚 全链路自启动"
@@ -374,7 +419,7 @@ ros2 run nav2_amcl amcl \
 AMCL_PID=$!
 log "  PIDs: scan=$SCAN_PID, amcl=$AMCL_PID"
 
-# 5c. AMCL lifecycle 手动激活（因为不在 nav2_minimal 的 lifecycle_manager 管理下）
+# 5c. AMCL lifecycle 手动激活 + 自动 initialpose
 log "  等待 AMCL 节点就绪..."
 for i in $(seq 1 10); do
     if ros2 node list 2>/dev/null | grep -q "/amcl"; then
@@ -384,39 +429,50 @@ for i in $(seq 1 10); do
     sleep 1
 done
 sleep 2
-log "  configure AMCL..."
-timeout 20 ros2 lifecycle set /amcl configure 2>/dev/null && sleep 1 || {
-    log "  ⚠️ configure 失败，尝试直接 activate..."
-    timeout 20 ros2 lifecycle set /amcl activate 2>/dev/null && sleep 1 || log "  ❌ AMCL 激活失败"
-}
-log "  activate AMCL..."
-timeout 20 ros2 lifecycle set /amcl activate 2>/dev/null && sleep 1 || log "  ⚠️ activate 超时或失败"
 
-# 自动设置初始位姿（必须用 Python/rclpy + now()，ros2 topic pub -1 的 stamp=0 会被 AMCL 丢弃）
+ensure_lifecycle_active /amcl || {
+    log "❌ AMCL 未能 active，终止"
+    exit 1
+}
+
+# 自动设置初始位姿
 DEFAULT_X="${GB_INIT_X:-0.49}"
 DEFAULT_Y="${GB_INIT_Y:-0.72}"
 YAW_RAD="${GB_INIT_YAW:--0.314}"
 publish_initialpose_now "$DEFAULT_X" "$DEFAULT_Y" "$YAW_RAD" || {
-    log "⚠️ initialpose 发布失败，定位可能不准确"
+    log "❌ initialpose 发布失败，终止"
+    exit 1
 }
 
 wait_for_tf "map" "camera_init" 30 || {
-    log "⚠️ TF map→camera_init 未就绪，AMCL 可能还在初始化"
+    log "❌ map→camera_init 未就绪，终止"
+    exit 1
 }
 # 额外等待 AMCL 粒子收敛
 sleep 5
 log "✅ 定位栈就绪"
 
-# AMCL 就绪后，激活其余 Nav2 节点
+# AMCL 就绪后，激活其余 Nav2 节点（严格检查每个节点）
 log "  激活 Nav2 导航节点..."
-NAV2_NAV_NODES=("controller_server" "smoother_server" "planner_server" "behavior_server" "bt_navigator" "velocity_smoother")
-for node in "${NAV2_NAV_NODES[@]}"; do
-    timeout 15 ros2 lifecycle set "/$node" configure 2>/dev/null || log "    ⚠️ /$node configure 超时"
-    sleep 0.5
-    timeout 15 ros2 lifecycle set "/$node" activate 2>/dev/null || log "    ⚠️ /$node activate 超时"
-    sleep 0.3
+NAV2_ACTIVE_OK=1
+for n in \
+    /planner_server \
+    /controller_server \
+    /smoother_server \
+    /behavior_server \
+    /bt_navigator \
+    /velocity_smoother
+do
+    ensure_lifecycle_active "$n" || {
+        log "❌ $n 未能 active"
+        NAV2_ACTIVE_OK=0
+    }
 done
-log "  ✅ Nav2 导航节点 activation 完成"
+if [ "$NAV2_ACTIVE_OK" != "1" ]; then
+    log "❌ Nav2 导航节点未全部 active，停止启动后续链路"
+    exit 1
+fi
+log "✅ Nav2 导航节点全部 active"
 
 # ============================================================
 # 7. 碰撞监控
