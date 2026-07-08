@@ -8,12 +8,13 @@
 #   2. 静态 TF                     → livox_imu_link→base_link→lidar_link→livox_frame
 #   3. Perception (点云滤波)       → /points_nav
 #   4. Odometry 2D 投影            → /Odometry_2d (供 Nav2 使用)
-#   5. Nav2 导航栈                 → /cmd_vel_nav, /map
-#   6. 定位 (cloud→scan + AMCL)    → map→camera_init 变换
-#   7. 碰撞监控                    → /cmd_vel_collision
-#   8. 安全闸门                    → /cmd_vel_base
-#   9. Web 遥控
-#  10. 狗端 SDK + adapter          → 先启动狗端 → 再连 SDK → 等 connected → (可选)standUp
+#   5. Nav2 节点启动 + map_server 激活 → /map
+#   6. cloud_to_scan + AMCL 定位  → map→camera_init TF
+#   7. Nav2 导航节点激活 (planner/controller/smoother/...) → /cmd_vel_nav
+#   8. 碰撞监控                    → /cmd_vel_collision
+#   9. 安全闸门                    → /cmd_vel_base
+#  10. Web 遥控
+#  11. 底盘适配器                  → SDK → 狗
 # ============================================================
 set -e
 
@@ -313,18 +314,12 @@ wait_for_topic "/map" 30 || {
     exit 1
 }
 
-# 手动 lifecycle 激活所有 Nav2 节点（无 lifecycle_manager）
-log "  手动激活 Nav2 节点..."
-NAV2_LIFECYCLE_NODES=("map_server" "controller_server" "smoother_server" "planner_server" "behavior_server" "bt_navigator" "velocity_smoother")
-for node in "${NAV2_LIFECYCLE_NODES[@]}"; do
-    log "    configuring /$node..."
-    timeout 15 ros2 lifecycle set "/$node" configure 2>/dev/null || log "    ⚠️ /$node configure 超时"
-    sleep 0.5
-    log "    activating /$node..."
-    timeout 15 ros2 lifecycle set "/$node" activate 2>/dev/null || log "    ⚠️ /$node activate 超时"
-    sleep 0.5
-done
-log "  ✅ Nav2 节点 lifecycle 激活完成"
+# 先只激活 map_server，提供 /map；其余节点等 AMCL 定位就绪后再激活
+log "  激活 map_server..."
+timeout 15 ros2 lifecycle set /map_server configure 2>/dev/null || log "  ⚠️ map_server configure 超时"
+sleep 0.5
+timeout 15 ros2 lifecycle set /map_server activate 2>/dev/null || log "  ⚠️ map_server activate 超时"
+log "  ✅ map_server active"
 
 # ============================================================
 # 6. 定位: pointcloud_to_laserscan + AMCL
@@ -395,6 +390,19 @@ wait_for_tf "map" "camera_init" 30 || {
 # 额外等待 AMCL 粒子收敛
 sleep 5
 log "✅ 定位栈就绪"
+
+# AMCL 就绪后，激活其余 Nav2 节点
+log "  激活 Nav2 导航节点..."
+NAV2_NAV_NODES=("controller_server" "smoother_server" "planner_server" "behavior_server" "bt_navigator" "velocity_smoother")
+for node in "${NAV2_NAV_NODES[@]}"; do
+    log "    configuring /$node..."
+    timeout 15 ros2 lifecycle set "/$node" configure 2>/dev/null || log "    ⚠️ /$node configure 超时"
+    sleep 0.5
+    log "    activating /$node..."
+    timeout 15 ros2 lifecycle set "/$node" activate 2>/dev/null || log "    ⚠️ /$node activate 超时"
+    sleep 0.5
+done
+log "  ✅ Nav2 导航节点 activation 完成"
 
 # ============================================================
 # 7. 碰撞监控
