@@ -263,8 +263,13 @@ class SafetyNode(Node):
         web_age = now - self._last_web_cmd_time if self._last_web_cmd_time > 0 else 999.0
         nav_age = now - self._last_nav_cmd_time if self._last_nav_cmd_time > 0 else 999.0
 
-        # Web 遥控活跃判定：有近期指令 (在 cmd_timeout 内)
-        self._web_active = web_age < self._cmd_tout
+        # Web 遥控活跃判定：有近期指令 且 非零速度
+        web_nonzero = (
+            abs(self._web_vx) > 1e-3 or
+            abs(self._web_vy) > 1e-3 or
+            abs(self._web_wz) > 1e-3
+        )
+        self._web_active = (web_age < self._cmd_tout) and web_nonzero
 
         if self._web_active:
             # Web 遥控优先

@@ -52,7 +52,7 @@ for _ in range(6):
     _ws_root = os.path.dirname(_ws_root)
 _SDK_LIB_PATH = os.environ.get(
     'GB_SDK_LIB_PATH',
-    os.path.join(_ws_root, 'sdk', 'genisom_l1_sdk-main', 'lib', 'zsl-1', arch))
+    os.path.join(_ws_root, 'sdk', 'genisom_l1_sdk-main', 'lib', 'zsl-1w', arch))
 sys.path.insert(0, _SDK_LIB_PATH)
 
 
@@ -175,8 +175,8 @@ class RealBaseAdapter(Node):
     def _init_sdk(self):
         """首次 SDK 初始化 (__init__ 调用)"""
         try:
-            import mc_sdk_zsl_1_py
-            self._sdk = mc_sdk_zsl_1_py.HighLevel()
+            import mc_sdk_zsl_1w_py
+            self._sdk = mc_sdk_zsl_1w_py.HighLevel()
             self._sdk.initRobot(self._local_ip, self._local_port, self._dog_ip)
             self.get_logger().info(
                 f'SDK initRobot: local={self._local_ip}:{self._local_port}, '
@@ -208,8 +208,8 @@ class RealBaseAdapter(Node):
             time.sleep(2.0)  # 等 OS 释放 socket (TIME_WAIT) + DNS 解析完成
 
         try:
-            import mc_sdk_zsl_1_py
-            self._sdk = mc_sdk_zsl_1_py.HighLevel()
+            import mc_sdk_zsl_1w_py
+            self._sdk = mc_sdk_zsl_1w_py.HighLevel()
             self._sdk.initRobot(self._local_ip, self._local_port, self._dog_ip)
             time.sleep(1)
             connected = self._sdk.checkConnect()
@@ -619,7 +619,7 @@ class RealBaseAdapter(Node):
             status.message = f'Mode: {mode_name}'
 
         status.name = 'gb_base_driver (real)'
-        status.hardware_id = 'zsl-1'
+        status.hardware_id = 'zsl-1w'
 
         battery = data['battery'] if data and isinstance(data.get('battery'), (int, float)) else -1
         status.values = [

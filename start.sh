@@ -34,7 +34,7 @@ MAP_YAML="/home/nvidia/gb_maps/$(date +%Y%m%d)_gb_pointfoot/map.yaml"
 WEB_PORT="8080"
 DOG_SSH="sshpass -p firefly ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 firefly@${DOG_IP}"
 SDK_PYTHON="python3.10"
-SDK_PATH="/home/nvidia/gb_ws2/sdk/genisom_l1_sdk-main/lib/zsl-1/aarch64"
+SDK_PATH="/home/nvidia/gb_ws2/sdk/genisom_l1_sdk-main/lib/zsl-1w/aarch64"
 
 # 实机模式用更保守的速度上限
 if [[ "$REAL_MODE" == "true" ]]; then
@@ -124,8 +124,8 @@ sleep 3  # 等 mc_ctrl 完全就绪
 echo -n "  SDK 连接验证 ... "
 SDK_OUT=$($SDK_PYTHON -c "
 import sys; sys.path.insert(0,'$SDK_PATH')
-import mc_sdk_zsl_1_py, time
-s = mc_sdk_zsl_1_py.HighLevel()
+import mc_sdk_zsl_1w_py, time
+s = mc_sdk_zsl_1w_py.HighLevel()
 s.initRobot('$JETSON_IP', $SDK_PORT, '$DOG_IP')
 time.sleep(2)
 mode = s.getCurrentCtrlmode()
@@ -140,8 +140,8 @@ if echo "$SDK_OUT" | grep -q "InValid"; then
     sleep 8
     SDK_OUT=$($SDK_PYTHON -c "
 import sys; sys.path.insert(0,'$SDK_PATH')
-import mc_sdk_zsl_1_py, time
-s = mc_sdk_zsl_1_py.HighLevel()
+import mc_sdk_zsl_1w_py, time
+s = mc_sdk_zsl_1w_py.HighLevel()
 s.initRobot('$JETSON_IP', $SDK_PORT, '$DOG_IP')
 time.sleep(2)
 print(f'MODE={s.getCurrentCtrlmode()} BATT={s.getBatteryPower()}')

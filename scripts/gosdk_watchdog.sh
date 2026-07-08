@@ -33,7 +33,7 @@ start_sdk() {
     ifconfig lo multicast 2>/dev/null || true
     route add -net 224.0.0.0 netmask 240.0.0.0 dev lo 2>/dev/null || true
     export LD_LIBRARY_PATH="$SDK_DIR"
-    export ROBOT_TYPE=XG
+    export ROBOT_TYPE=XGW
     export SDK_CLIENT_IP="$SDK_CLIENT_IP"
     cd "$SDK_DIR"
     taskset -c 7 $SDK_BIN $SDK_ARGS &
